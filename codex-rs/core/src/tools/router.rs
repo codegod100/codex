@@ -21,6 +21,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::instrument;
 
+const SHELL_TOOL_ALIASES: &[&str] = &[
+    "shell",
+    "container.exec",
+    "local_shell",
+    "shell_command",
+    "exec_command",
+];
+
 #[derive(Clone, Debug)]
 pub struct ToolCall {
     pub tool_name: String,
@@ -53,6 +61,20 @@ impl ToolRouter {
     }
 
     pub fn tool_supports_parallel(&self, tool_name: &str) -> bool {
+        if self.configured_tool_supports_parallel(tool_name) {
+            return true;
+        }
+
+        if SHELL_TOOL_ALIASES.contains(&tool_name) {
+            return SHELL_TOOL_ALIASES
+                .iter()
+                .any(|alias| self.configured_tool_supports_parallel(alias));
+        }
+
+        false
+    }
+
+    fn configured_tool_supports_parallel(&self, tool_name: &str) -> bool {
         self.specs
             .iter()
             .filter(|config| config.supports_parallel_tool_calls)
@@ -187,5 +209,34 @@ impl ToolRouter {
                 },
             }
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use crate::config::test_config;
+    use crate::features::Features;
+    use crate::models_manager::manager::ModelsManager;
+    use crate::tools::spec::ToolsConfig;
+    use crate::tools::spec::ToolsConfigParams;
+    use codex_protocol::config_types::WebSearchMode;
+
+    use super::ToolRouter;
+
+    #[test]
+    fn shell_aliases_inherit_parallel_support() {
+        let config = test_config();
+        let model_info = ModelsManager::construct_model_info_offline("gpt-5.1", &config);
+        let features = Features::with_defaults();
+        let tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_info: &model_info,
+            features: &features,
+            web_search_mode: Some(WebSearchMode::Cached),
+        });
+        let router = ToolRouter::from_config(&tools_config, None, &[]);
+
+        assert!(router.tool_supports_parallel("shell"));
+        assert!(router.tool_supports_parallel("shell_command"));
+        assert!(router.tool_supports_parallel("container.exec"));
+        assert!(router.tool_supports_parallel("local_shell"));
     }
 }
