@@ -3771,7 +3771,7 @@ pub(crate) async fn run_turn(
         collaboration_mode_kind: turn_context.collaboration_mode.mode,
     });
     sess.send_event(&turn_context, event).await;
-    if is_projected_turn_usage_over_auto_compact_limit(
+    if is_projected_submission_over_auto_compact_limit(
         total_usage_tokens,
         incoming_user_tokens,
         auto_compact_limit,
@@ -4070,7 +4070,7 @@ fn estimate_single_user_input_token_count(input: &UserInput) -> i64 {
     }
 }
 
-fn is_projected_turn_usage_over_auto_compact_limit(
+fn is_projected_submission_over_auto_compact_limit(
     total_usage_tokens: i64,
     incoming_user_tokens: i64,
     auto_compact_limit: i64,
@@ -4088,7 +4088,7 @@ fn is_over_limit_due_to_incoming_user_tokens(
     auto_compact_limit: i64,
 ) -> bool {
     total_usage_tokens < auto_compact_limit
-        && is_projected_turn_usage_over_auto_compact_limit(
+        && is_projected_submission_over_auto_compact_limit(
             total_usage_tokens,
             incoming_user_tokens,
             auto_compact_limit,
@@ -5177,13 +5177,13 @@ mod tests {
 
     #[test]
     fn pre_turn_projection_uses_incoming_user_tokens_for_compaction() {
-        assert!(is_projected_turn_usage_over_auto_compact_limit(90, 15, 100));
-        assert!(!is_projected_turn_usage_over_auto_compact_limit(90, 9, 100));
+        assert!(is_projected_submission_over_auto_compact_limit(90, 15, 100));
+        assert!(!is_projected_submission_over_auto_compact_limit(90, 9, 100));
     }
 
     #[test]
     fn pre_turn_projection_does_not_compact_with_unbounded_limit() {
-        assert!(!is_projected_turn_usage_over_auto_compact_limit(
+        assert!(!is_projected_submission_over_auto_compact_limit(
             i64::MAX - 1,
             100,
             i64::MAX,
