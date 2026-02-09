@@ -33,6 +33,7 @@ use super::list::ThreadsPage;
 use super::list::get_threads;
 use super::list::get_threads_in_root;
 use super::metadata;
+use super::policy::EventPersistenceMode;
 use super::policy::is_persisted_response_item;
 use crate::config::Config;
 use crate::default_client::originator;
@@ -40,6 +41,7 @@ use crate::git_info::collect_git_info;
 use crate::path_utils;
 use crate::state_db;
 use crate::state_db::StateDbHandle;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::ResumedHistory;
 use codex_protocol::protocol::RolloutItem;
@@ -64,6 +66,7 @@ pub struct RolloutRecorder {
     tx: Sender<RolloutCmd>,
     pub(crate) rollout_path: PathBuf,
     state_db: Option<StateDbHandle>,
+    event_persistence_mode: EventPersistenceMode,
 }
 
 #[derive(Clone)]
@@ -74,9 +77,11 @@ pub enum RolloutRecorderParams {
         source: SessionSource,
         base_instructions: BaseInstructions,
         dynamic_tools: Vec<DynamicToolSpec>,
+        event_persistence_mode: EventPersistenceMode,
     },
     Resume {
         path: PathBuf,
+        event_persistence_mode: EventPersistenceMode,
     },
 }
 
@@ -101,6 +106,7 @@ impl RolloutRecorderParams {
         source: SessionSource,
         base_instructions: BaseInstructions,
         dynamic_tools: Vec<DynamicToolSpec>,
+        event_persistence_mode: EventPersistenceMode,
     ) -> Self {
         Self::Create {
             conversation_id,
@@ -108,12 +114,77 @@ impl RolloutRecorderParams {
             source,
             base_instructions,
             dynamic_tools,
+            event_persistence_mode,
         }
     }
 
-    pub fn resume(path: PathBuf) -> Self {
-        Self::Resume { path }
+    pub fn resume(path: PathBuf, event_persistence_mode: EventPersistenceMode) -> Self {
+        Self::Resume {
+            path,
+            event_persistence_mode,
+        }
     }
+}
+
+const PERSISTED_EXEC_AGGREGATED_OUTPUT_MAX_LINES: usize = 400;
+const PERSISTED_EXEC_AGGREGATED_OUTPUT_MAX_BYTES: usize = 64 * 1024;
+const PERSISTED_EXEC_OUTPUT_TRUNCATION_NOTICE: &str =
+    "[... output truncated in persisted history; showing most recent lines ...]";
+
+fn sanitize_rollout_item_for_persistence(
+    item: RolloutItem,
+    mode: EventPersistenceMode,
+) -> RolloutItem {
+    if mode != EventPersistenceMode::FullHistory {
+        return item;
+    }
+
+    match item {
+        RolloutItem::EventMsg(EventMsg::ExecCommandEnd(mut event)) => {
+            event.aggregated_output = truncate_to_tail(
+                &event.aggregated_output,
+                PERSISTED_EXEC_AGGREGATED_OUTPUT_MAX_LINES,
+                PERSISTED_EXEC_AGGREGATED_OUTPUT_MAX_BYTES,
+            );
+            event.stdout.clear();
+            event.stderr.clear();
+            event.formatted_output.clear();
+            RolloutItem::EventMsg(EventMsg::ExecCommandEnd(event))
+        }
+        _ => item,
+    }
+}
+
+fn truncate_to_tail(input: &str, max_lines: usize, max_bytes: usize) -> String {
+    if input.is_empty() || max_lines == 0 || max_bytes == 0 {
+        return String::new();
+    }
+
+    let lines: Vec<&str> = input.split_inclusive('\n').collect();
+    let total_lines = lines.len();
+    let start_line = total_lines.saturating_sub(max_lines);
+    let mut tail = lines[start_line..].concat();
+    let truncated_by_lines = start_line > 0;
+
+    let truncated_by_bytes = tail.len() > max_bytes;
+    if truncated_by_bytes {
+        let mut start = tail.len().saturating_sub(max_bytes);
+        while start < tail.len() && !tail.is_char_boundary(start) {
+            start = start.saturating_add(1);
+        }
+        tail = tail[start..].to_string();
+    }
+
+    if !truncated_by_lines && !truncated_by_bytes {
+        return tail;
+    }
+
+    let mut out =
+        String::with_capacity(PERSISTED_EXEC_OUTPUT_TRUNCATION_NOTICE.len() + 1 + tail.len());
+    out.push_str(PERSISTED_EXEC_OUTPUT_TRUNCATION_NOTICE);
+    out.push('\n');
+    out.push_str(&tail);
+    out
 }
 
 impl RolloutRecorder {
@@ -295,58 +366,70 @@ impl RolloutRecorder {
         state_db_ctx: Option<StateDbHandle>,
         state_builder: Option<ThreadMetadataBuilder>,
     ) -> std::io::Result<Self> {
-        let (file, deferred_log_file_info, rollout_path, meta) = match params {
-            RolloutRecorderParams::Create {
-                conversation_id,
-                forked_from_id,
-                source,
-                base_instructions,
-                dynamic_tools,
-            } => {
-                let log_file_info = precompute_log_file_info(config, conversation_id)?;
-                let path = log_file_info.path.clone();
-                let session_id = log_file_info.conversation_id;
-                let started_at = log_file_info.timestamp;
-
-                let timestamp_format: &[FormatItem] = format_description!(
-                    "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
-                );
-                let timestamp = started_at
-                    .to_offset(time::UtcOffset::UTC)
-                    .format(timestamp_format)
-                    .map_err(|e| IoError::other(format!("failed to format timestamp: {e}")))?;
-
-                let session_meta = SessionMeta {
-                    id: session_id,
+        let (file, deferred_log_file_info, rollout_path, meta, event_persistence_mode) =
+            match params {
+                RolloutRecorderParams::Create {
+                    conversation_id,
                     forked_from_id,
-                    timestamp,
-                    cwd: config.cwd.clone(),
-                    originator: originator().value,
-                    cli_version: env!("CARGO_PKG_VERSION").to_string(),
                     source,
-                    model_provider: Some(config.model_provider_id.clone()),
-                    base_instructions: Some(base_instructions),
-                    dynamic_tools: if dynamic_tools.is_empty() {
-                        None
-                    } else {
-                        Some(dynamic_tools)
-                    },
-                };
+                    base_instructions,
+                    dynamic_tools,
+                    event_persistence_mode,
+                } => {
+                    let log_file_info = precompute_log_file_info(config, conversation_id)?;
+                    let path = log_file_info.path.clone();
+                    let session_id = log_file_info.conversation_id;
+                    let started_at = log_file_info.timestamp;
 
-                (None, Some(log_file_info), path, Some(session_meta))
-            }
-            RolloutRecorderParams::Resume { path } => (
-                Some(
-                    tokio::fs::OpenOptions::new()
-                        .append(true)
-                        .open(&path)
-                        .await?,
+                    let timestamp_format: &[FormatItem] = format_description!(
+                        "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+                    );
+                    let timestamp = started_at
+                        .to_offset(time::UtcOffset::UTC)
+                        .format(timestamp_format)
+                        .map_err(|e| IoError::other(format!("failed to format timestamp: {e}")))?;
+
+                    let session_meta = SessionMeta {
+                        id: session_id,
+                        forked_from_id,
+                        timestamp,
+                        cwd: config.cwd.clone(),
+                        originator: originator().value,
+                        cli_version: env!("CARGO_PKG_VERSION").to_string(),
+                        source,
+                        model_provider: Some(config.model_provider_id.clone()),
+                        base_instructions: Some(base_instructions),
+                        dynamic_tools: if dynamic_tools.is_empty() {
+                            None
+                        } else {
+                            Some(dynamic_tools)
+                        },
+                    };
+
+                    (
+                        None,
+                        Some(log_file_info),
+                        path,
+                        Some(session_meta),
+                        event_persistence_mode,
+                    )
+                }
+                RolloutRecorderParams::Resume {
+                    path,
+                    event_persistence_mode,
+                } => (
+                    Some(
+                        tokio::fs::OpenOptions::new()
+                            .append(true)
+                            .open(&path)
+                            .await?,
+                    ),
+                    None,
+                    path,
+                    None,
+                    event_persistence_mode,
                 ),
-                None,
-                path,
-                None,
-            ),
-        };
+            };
 
         // Clone the cwd for the spawned task to collect git info asynchronously
         let cwd = config.cwd.clone();
@@ -375,6 +458,7 @@ impl RolloutRecorder {
             tx,
             rollout_path,
             state_db: state_db_ctx,
+            event_persistence_mode,
         })
     }
 
@@ -392,8 +476,11 @@ impl RolloutRecorder {
             // Note that function calls may look a bit strange if they are
             // "fully qualified MCP tool calls," so we could consider
             // reformatting them in that case.
-            if is_persisted_response_item(item) {
-                filtered.push(item.clone());
+            if is_persisted_response_item(item, self.event_persistence_mode) {
+                filtered.push(sanitize_rollout_item_for_persistence(
+                    item.clone(),
+                    self.event_persistence_mode,
+                ));
             }
         }
         if filtered.is_empty() {
@@ -625,9 +712,7 @@ async fn rollout_writer(
             RolloutCmd::AddItems(items) => {
                 let mut persisted_items = Vec::new();
                 for item in items {
-                    if is_persisted_response_item(&item) {
-                        persisted_items.push(item);
-                    }
+                    persisted_items.push(item);
                 }
                 if persisted_items.is_empty() {
                     continue;
@@ -914,6 +999,7 @@ mod tests {
                 SessionSource::Exec,
                 BaseInstructions::default(),
                 Vec::new(),
+                EventPersistenceMode::Compact,
             ),
             None,
             None,
