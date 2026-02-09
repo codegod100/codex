@@ -79,6 +79,7 @@ async fn run_remote_compact_task_inner_impl(
     if deleted_items > 0 {
         info!(
             turn_id = %turn_context.sub_id,
+            auto_compact_callsite = ?auto_compact_callsite,
             deleted_items,
             "trimmed history items before remote compaction"
         );
@@ -115,6 +116,7 @@ async fn run_remote_compact_task_inner_impl(
                 build_compact_request_log_data(&prompt.input, &prompt.base_instructions.text);
             log_remote_compact_failure(
                 turn_context,
+                auto_compact_callsite,
                 &compact_request_log_data,
                 total_usage_breakdown,
                 &err,
@@ -168,12 +170,14 @@ fn build_compact_request_log_data(
 
 fn log_remote_compact_failure(
     turn_context: &TurnContext,
+    auto_compact_callsite: AutoCompactCallsite,
     log_data: &CompactRequestLogData,
     total_usage_breakdown: TotalTokenUsageBreakdown,
     err: &CodexErr,
 ) {
     error!(
         turn_id = %turn_context.sub_id,
+        auto_compact_callsite = ?auto_compact_callsite,
         last_api_response_total_tokens = total_usage_breakdown.last_api_response_total_tokens,
         all_history_items_model_visible_bytes = total_usage_breakdown.all_history_items_model_visible_bytes,
         estimated_tokens_of_items_added_since_last_successful_api_response = total_usage_breakdown.estimated_tokens_of_items_added_since_last_successful_api_response,

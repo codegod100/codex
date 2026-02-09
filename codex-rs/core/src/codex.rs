@@ -3796,6 +3796,14 @@ pub(crate) async fn run_turn(
             incoming_user_tokens,
             auto_compact_limit,
         ) {
+            error!(
+                turn_id = %turn_context.sub_id,
+                auto_compact_callsite = ?AutoCompactCallsite::PreTurn,
+                total_usage_tokens_after_compact,
+                incoming_user_tokens,
+                auto_compact_limit,
+                "context still exceeds auto-compaction limit after auto-compaction"
+            );
             let event = EventMsg::Error(CodexErr::ContextWindowExceeded.to_error_event(Some(
                 "Context still exceeds auto-compaction limit after auto-compaction".to_string(),
             )));
@@ -4067,22 +4075,32 @@ async fn run_auto_compact(
     turn_context: &Arc<TurnContext>,
     auto_compact_callsite: AutoCompactCallsite,
 ) -> CodexResult<()> {
-    if should_use_remote_compact_task(&turn_context.provider) {
+    let result = if should_use_remote_compact_task(&turn_context.provider) {
         run_inline_remote_auto_compact_task(
             Arc::clone(sess),
             Arc::clone(turn_context),
             auto_compact_callsite,
         )
-        .await?;
+        .await
     } else {
         run_inline_auto_compact_task(
             Arc::clone(sess),
             Arc::clone(turn_context),
             auto_compact_callsite,
         )
-        .await?;
+        .await
+    };
+
+    if let Err(err) = &result {
+        error!(
+            turn_id = %turn_context.sub_id,
+            auto_compact_callsite = ?auto_compact_callsite,
+            compact_error = %err,
+            "auto compaction failed"
+        );
     }
-    Ok(())
+
+    result
 }
 
 fn filter_connectors_for_input(
