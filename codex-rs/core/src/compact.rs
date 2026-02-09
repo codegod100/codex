@@ -33,7 +33,7 @@ pub const SUMMARY_PREFIX: &str = include_str!("../templates/compact/summary_pref
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AutoCompactPhase {
+pub(crate) enum AutoCompactCallsite {
     PreTurn,
     MidTurnContinuation,
 }
@@ -45,7 +45,7 @@ pub(crate) fn should_use_remote_compact_task(provider: &ModelProviderInfo) -> bo
 pub(crate) async fn run_inline_auto_compact_task(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
-    _phase: AutoCompactPhase,
+    _auto_compact_callsite: AutoCompactCallsite,
 ) -> CodexResult<()> {
     let prompt = turn_context.compact_prompt().to_string();
     let input = vec![UserInput::Text {
@@ -263,23 +263,23 @@ pub(crate) fn is_summary_message(message: &str) -> bool {
 pub(crate) fn process_compacted_history(
     mut compacted_history: Vec<ResponseItem>,
     initial_context: &[ResponseItem],
-    phase: AutoCompactPhase,
+    auto_compact_callsite: AutoCompactCallsite,
 ) -> Vec<ResponseItem> {
     compacted_history.retain(should_keep_compacted_history_item);
 
     let initial_context = initial_context.to_vec();
 
-    match phase {
+    match auto_compact_callsite {
         // Pre-turn compaction runs before we record the incoming user message.
         // Appending canonical context keeps it directly above that next user
         // message instead of re-anchoring it to older compacted turns.
-        AutoCompactPhase::PreTurn => {
+        AutoCompactCallsite::PreTurn => {
             compacted_history.extend(initial_context);
         }
         // Mid-turn continuation compaction runs after the user message has
         // already been recorded. Keep canonical context directly above that
         // "orphan" user message so continuation sampling sees fresh context.
-        AutoCompactPhase::MidTurnContinuation => {
+        AutoCompactCallsite::MidTurnContinuation => {
             if let Some(anchor_index) = find_mid_turn_continuation_anchor(&compacted_history) {
                 compacted_history.splice(anchor_index..anchor_index, initial_context);
             } else {
@@ -696,7 +696,7 @@ do things
         let refreshed = process_compacted_history(
             compacted_history,
             &initial_context,
-            AutoCompactPhase::PreTurn,
+            AutoCompactCallsite::PreTurn,
         );
         let expected = vec![
             ResponseItem::Message {
@@ -809,7 +809,7 @@ keep me updated
         let refreshed = process_compacted_history(
             compacted_history,
             &initial_context,
-            AutoCompactPhase::PreTurn,
+            AutoCompactCallsite::PreTurn,
         );
         let expected = vec![
             ResponseItem::Message {
@@ -949,7 +949,7 @@ keep me updated
         let refreshed = process_compacted_history(
             compacted_history,
             &initial_context,
-            AutoCompactPhase::PreTurn,
+            AutoCompactCallsite::PreTurn,
         );
         let expected = vec![
             ResponseItem::Message {
@@ -1018,7 +1018,7 @@ keep me updated
         let refreshed = process_compacted_history(
             compacted_history,
             &initial_context,
-            AutoCompactPhase::MidTurnContinuation,
+            AutoCompactCallsite::MidTurnContinuation,
         );
         let expected = vec![
             ResponseItem::Message {
@@ -1096,7 +1096,7 @@ keep me updated
         let refreshed = process_compacted_history(
             compacted_history,
             &initial_context,
-            AutoCompactPhase::PreTurn,
+            AutoCompactCallsite::PreTurn,
         );
         let expected = vec![
             ResponseItem::Message {
@@ -1165,7 +1165,7 @@ keep me updated
         let refreshed = process_compacted_history(
             compacted_history,
             &initial_context,
-            AutoCompactPhase::MidTurnContinuation,
+            AutoCompactCallsite::MidTurnContinuation,
         );
         let expected = vec![
             ResponseItem::Message {

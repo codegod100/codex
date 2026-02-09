@@ -15,7 +15,7 @@ use crate::agent::agent_status_from_event;
 use crate::analytics_client::AnalyticsEventsClient;
 use crate::analytics_client::build_track_events_context;
 use crate::compact;
-use crate::compact::AutoCompactPhase;
+use crate::compact::AutoCompactCallsite;
 use crate::compact::run_inline_auto_compact_task;
 use crate::compact::should_use_remote_compact_task;
 use crate::compact_remote::run_inline_remote_auto_compact_task;
@@ -2100,10 +2100,14 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         compacted_history: Vec<ResponseItem>,
-        phase: AutoCompactPhase,
+        auto_compact_callsite: AutoCompactCallsite,
     ) -> Vec<ResponseItem> {
         let initial_context = self.build_initial_context(turn_context).await;
-        compact::process_compacted_history(compacted_history, &initial_context, phase)
+        compact::process_compacted_history(
+            compacted_history,
+            &initial_context,
+            auto_compact_callsite,
+        )
     }
 
     /// Append ResponseItems to the in-memory conversation history only.
@@ -3772,7 +3776,7 @@ pub(crate) async fn run_turn(
         incoming_user_tokens,
         auto_compact_limit,
     ) {
-        if run_auto_compact(&sess, &turn_context, AutoCompactPhase::PreTurn)
+        if run_auto_compact(&sess, &turn_context, AutoCompactCallsite::PreTurn)
             .await
             .is_err()
         {
@@ -3973,9 +3977,13 @@ pub(crate) async fn run_turn(
 
                 // as long as compaction works well in getting us way below the token limit, we shouldn't worry about being in an infinite loop.
                 if token_limit_reached && needs_follow_up {
-                    if run_auto_compact(&sess, &turn_context, AutoCompactPhase::MidTurnContinuation)
-                        .await
-                        .is_err()
+                    if run_auto_compact(
+                        &sess,
+                        &turn_context,
+                        AutoCompactCallsite::MidTurnContinuation,
+                    )
+                    .await
+                    .is_err()
                     {
                         return None;
                     }
@@ -4090,13 +4098,22 @@ fn is_over_limit_due_to_incoming_user_tokens(
 async fn run_auto_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
-    phase: AutoCompactPhase,
+    auto_compact_callsite: AutoCompactCallsite,
 ) -> CodexResult<()> {
     if should_use_remote_compact_task(&turn_context.provider) {
-        run_inline_remote_auto_compact_task(Arc::clone(sess), Arc::clone(turn_context), phase)
-            .await?;
+        run_inline_remote_auto_compact_task(
+            Arc::clone(sess),
+            Arc::clone(turn_context),
+            auto_compact_callsite,
+        )
+        .await?;
     } else {
-        run_inline_auto_compact_task(Arc::clone(sess), Arc::clone(turn_context), phase).await?;
+        run_inline_auto_compact_task(
+            Arc::clone(sess),
+            Arc::clone(turn_context),
+            auto_compact_callsite,
+        )
+        .await?;
     }
     Ok(())
 }
