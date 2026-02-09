@@ -38,6 +38,7 @@ use crate::stream_events_utils::handle_output_item_done;
 use crate::stream_events_utils::last_assistant_message_from_item;
 use crate::terminal;
 use crate::truncate::TruncationPolicy;
+use crate::truncate::approx_tokens_from_byte_count_i64;
 use crate::turn_metadata::build_turn_metadata_header;
 use crate::turn_metadata::resolve_turn_metadata_header_with_timeout;
 use crate::util::error_or_panic;
@@ -116,6 +117,7 @@ use crate::config::types::McpServerConfig;
 use crate::config::types::ShellEnvironmentPolicy;
 use crate::context_manager::ContextManager;
 use crate::context_manager::TotalTokenUsageBreakdown;
+use crate::context_manager::estimate_response_item_model_visible_bytes;
 use crate::environment_context::EnvironmentContext;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
@@ -3763,8 +3765,9 @@ pub(crate) async fn run_turn(
 
     let model_info = turn_context.model_info.clone();
     let auto_compact_limit = model_info.auto_compact_token_limit().unwrap_or(i64::MAX);
+    let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input.clone());
     let total_usage_tokens = sess.get_total_token_usage().await;
-    let incoming_user_tokens = estimate_user_input_token_count(&input);
+    let incoming_user_tokens = estimate_response_input_item_token_count(&initial_input_for_turn);
 
     let event = EventMsg::TurnStarted(TurnStartedEvent {
         model_context_window: turn_context.model_context_window(),
@@ -3873,7 +3876,6 @@ pub(crate) async fn run_turn(
             .await;
     }
 
-    let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input.clone());
     let response_item: ResponseItem = initial_input_for_turn.clone().into();
     sess.record_user_prompt_and_emit_turn_item(turn_context.as_ref(), &input, response_item)
         .await;
@@ -4044,28 +4046,10 @@ pub(crate) async fn run_turn(
     last_agent_message
 }
 
-fn estimate_user_input_token_count(input: &[UserInput]) -> i64 {
-    input
-        .iter()
-        .map(estimate_single_user_input_token_count)
-        .fold(0i64, i64::saturating_add)
-}
-
-fn estimate_single_user_input_token_count(input: &UserInput) -> i64 {
-    fn estimate_text(text: &str) -> i64 {
-        i64::try_from(crate::truncate::approx_token_count(text)).unwrap_or(i64::MAX)
-    }
-
-    match input {
-        UserInput::Text { text, .. } => estimate_text(text),
-        UserInput::Image { image_url } => estimate_text(image_url),
-        UserInput::LocalImage { path } => estimate_text(path.to_string_lossy().as_ref()),
-        // Structured skill/mention selections are not serialized into the user
-        // prompt payload (tool bodies are injected separately later), so they
-        // should not count toward pre-turn prompt projection.
-        UserInput::Skill { .. } | UserInput::Mention { .. } => 0,
-        _ => 0,
-    }
+fn estimate_response_input_item_token_count(input: &ResponseInputItem) -> i64 {
+    let response_item: ResponseItem = input.clone().into();
+    let model_visible_bytes = estimate_response_item_model_visible_bytes(&response_item);
+    approx_tokens_from_byte_count_i64(model_visible_bytes)
 }
 
 fn is_projected_submission_over_auto_compact_limit(
@@ -5192,22 +5176,43 @@ mod tests {
             text: "hello".to_string(),
             text_elements: Vec::new(),
         }];
-        assert!(estimate_user_input_token_count(&input) > 0);
+        let response_input_item = ResponseInputItem::from(input);
+        assert!(estimate_response_input_item_token_count(&response_input_item) > 0);
     }
 
     #[test]
-    fn estimate_user_input_token_count_ignores_skill_and_mention_inputs() {
-        let input = vec![
+    fn estimate_user_input_token_count_ignores_skill_and_mention_payload_lengths() {
+        let short = vec![
             UserInput::Skill {
-                name: "test-skill".to_string(),
-                path: PathBuf::from("/tmp/skills/test/SKILL.md"),
+                name: "s".to_string(),
+                path: PathBuf::from("/s"),
             },
             UserInput::Mention {
-                name: "notion".to_string(),
-                path: "app://notion".to_string(),
+                name: "m".to_string(),
+                path: "app://m".to_string(),
             },
         ];
-        assert_eq!(estimate_user_input_token_count(&input), 0);
+        let long = vec![
+            UserInput::Skill {
+                name: "very-long-skill-name-that-should-not-affect-prompt-serialization"
+                    .to_string(),
+                path: PathBuf::from(
+                    "/very/long/skill/path/that/should/not/affect/prompt/serialization/SKILL.md",
+                ),
+            },
+            UserInput::Mention {
+                name: "very-long-mention-name-that-should-not-affect-prompt-serialization"
+                    .to_string(),
+                path: "app://very-long-connector-path-that-should-not-affect-prompt-serialization"
+                    .to_string(),
+            },
+        ];
+
+        let short_response_input_item = ResponseInputItem::from(short);
+        let long_response_input_item = ResponseInputItem::from(long);
+        let short_tokens = estimate_response_input_item_token_count(&short_response_input_item);
+        let long_tokens = estimate_response_input_item_token_count(&long_response_input_item);
+        assert_eq!(short_tokens, long_tokens);
     }
 
     fn make_connector(id: &str, name: &str) -> AppInfo {
