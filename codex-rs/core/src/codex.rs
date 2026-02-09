@@ -3767,7 +3767,11 @@ pub(crate) async fn run_turn(
     let auto_compact_limit = model_info.auto_compact_token_limit().unwrap_or(i64::MAX);
     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input.clone());
     let total_usage_tokens = sess.get_total_token_usage().await;
-    let incoming_user_tokens = estimate_response_input_item_token_count(&initial_input_for_turn);
+    let incoming_user_tokens = {
+        let response_item: ResponseItem = initial_input_for_turn.clone().into();
+        let model_visible_bytes = estimate_response_item_model_visible_bytes(&response_item);
+        approx_tokens_from_byte_count_i64(model_visible_bytes)
+    };
 
     let event = EventMsg::TurnStarted(TurnStartedEvent {
         model_context_window: turn_context.model_context_window(),
@@ -4044,12 +4048,6 @@ pub(crate) async fn run_turn(
     }
 
     last_agent_message
-}
-
-fn estimate_response_input_item_token_count(input: &ResponseInputItem) -> i64 {
-    let response_item: ResponseItem = input.clone().into();
-    let model_visible_bytes = estimate_response_item_model_visible_bytes(&response_item);
-    approx_tokens_from_byte_count_i64(model_visible_bytes)
 }
 
 fn is_projected_submission_over_auto_compact_limit(
@@ -5177,7 +5175,10 @@ mod tests {
             text_elements: Vec::new(),
         }];
         let response_input_item = ResponseInputItem::from(input);
-        assert!(estimate_response_input_item_token_count(&response_input_item) > 0);
+        let response_item: ResponseItem = response_input_item.into();
+        let model_visible_bytes = estimate_response_item_model_visible_bytes(&response_item);
+        let estimated_tokens = approx_tokens_from_byte_count_i64(model_visible_bytes);
+        assert!(estimated_tokens > 0);
     }
 
     #[test]
@@ -5210,8 +5211,14 @@ mod tests {
 
         let short_response_input_item = ResponseInputItem::from(short);
         let long_response_input_item = ResponseInputItem::from(long);
-        let short_tokens = estimate_response_input_item_token_count(&short_response_input_item);
-        let long_tokens = estimate_response_input_item_token_count(&long_response_input_item);
+        let short_response_item: ResponseItem = short_response_input_item.into();
+        let long_response_item: ResponseItem = long_response_input_item.into();
+        let short_tokens = approx_tokens_from_byte_count_i64(
+            estimate_response_item_model_visible_bytes(&short_response_item),
+        );
+        let long_tokens = approx_tokens_from_byte_count_i64(
+            estimate_response_item_model_visible_bytes(&long_response_item),
+        );
         assert_eq!(short_tokens, long_tokens);
     }
 
