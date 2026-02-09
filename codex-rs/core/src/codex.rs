@@ -3784,13 +3784,13 @@ pub(crate) async fn run_turn(
         }
 
         let total_usage_tokens_after_compact = sess.get_total_token_usage().await;
-        if is_over_limit_due_to_incoming_user_tokens(
+        if is_projected_submission_over_auto_compact_limit(
             total_usage_tokens_after_compact,
             incoming_user_tokens,
             auto_compact_limit,
         ) {
             let event = EventMsg::Error(CodexErr::ContextWindowExceeded.to_error_event(Some(
-                "Incoming user message is too large to fit after auto-compaction".to_string(),
+                "Context still exceeds auto-compaction limit after auto-compaction".to_string(),
             )));
             sess.send_event(&turn_context, event).await;
             return None;
@@ -4080,19 +4080,6 @@ fn is_projected_submission_over_auto_compact_limit(
     }
 
     total_usage_tokens.saturating_add(incoming_user_tokens) >= auto_compact_limit
-}
-
-fn is_over_limit_due_to_incoming_user_tokens(
-    total_usage_tokens: i64,
-    incoming_user_tokens: i64,
-    auto_compact_limit: i64,
-) -> bool {
-    total_usage_tokens < auto_compact_limit
-        && is_projected_submission_over_auto_compact_limit(
-            total_usage_tokens,
-            incoming_user_tokens,
-            auto_compact_limit,
-        )
 }
 
 async fn run_auto_compact(
@@ -5191,10 +5178,14 @@ mod tests {
     }
 
     #[test]
-    fn incoming_user_limit_error_only_triggers_when_message_pushes_over_limit() {
-        assert!(is_over_limit_due_to_incoming_user_tokens(95, 10, 100));
-        assert!(!is_over_limit_due_to_incoming_user_tokens(100, 10, 100));
-        assert!(!is_over_limit_due_to_incoming_user_tokens(80, 10, 100));
+    fn post_compaction_projection_triggers_error_when_still_over_limit() {
+        assert!(is_projected_submission_over_auto_compact_limit(95, 10, 100));
+        assert!(is_projected_submission_over_auto_compact_limit(
+            100, 10, 100
+        ));
+        assert!(!is_projected_submission_over_auto_compact_limit(
+            80, 10, 100
+        ));
     }
 
     #[test]
