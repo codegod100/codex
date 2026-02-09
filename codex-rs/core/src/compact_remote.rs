@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::Prompt;
 use crate::codex::Session;
 use crate::codex::TurnContext;
+use crate::compact::AutoCompactPhase;
 use crate::context_manager::ContextManager;
 use crate::context_manager::TotalTokenUsageBreakdown;
 use crate::context_manager::estimate_response_item_model_visible_bytes;
@@ -24,8 +25,9 @@ use tracing::info;
 pub(crate) async fn run_inline_remote_auto_compact_task(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
+    phase: AutoCompactPhase,
 ) -> CodexResult<()> {
-    run_remote_compact_task_inner(&sess, &turn_context).await?;
+    run_remote_compact_task_inner(&sess, &turn_context, phase).await?;
     Ok(())
 }
 
@@ -39,14 +41,15 @@ pub(crate) async fn run_remote_compact_task(
     });
     sess.send_event(&turn_context, start_event).await;
 
-    run_remote_compact_task_inner(&sess, &turn_context).await
+    run_remote_compact_task_inner(&sess, &turn_context, AutoCompactPhase::PreTurn).await
 }
 
 async fn run_remote_compact_task_inner(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
+    phase: AutoCompactPhase,
 ) -> CodexResult<()> {
-    if let Err(err) = run_remote_compact_task_inner_impl(sess, turn_context).await {
+    if let Err(err) = run_remote_compact_task_inner_impl(sess, turn_context, phase).await {
         let event = EventMsg::Error(
             err.to_error_event(Some("Error running remote compact task".to_string())),
         );
@@ -59,6 +62,7 @@ async fn run_remote_compact_task_inner(
 async fn run_remote_compact_task_inner_impl(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
+    phase: AutoCompactPhase,
 ) -> CodexResult<()> {
     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
     sess.emit_turn_item_started(turn_context, &compaction_item)
@@ -117,7 +121,7 @@ async fn run_remote_compact_task_inner_impl(
         })
         .await?;
     new_history = sess
-        .process_compacted_history(turn_context, new_history)
+        .process_compacted_history(turn_context, new_history, phase)
         .await;
 
     if !ghost_snapshots.is_empty() {

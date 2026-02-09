@@ -15,6 +15,7 @@ use crate::agent::agent_status_from_event;
 use crate::analytics_client::AnalyticsEventsClient;
 use crate::analytics_client::build_track_events_context;
 use crate::compact;
+use crate::compact::AutoCompactPhase;
 use crate::compact::run_inline_auto_compact_task;
 use crate::compact::should_use_remote_compact_task;
 use crate::compact_remote::run_inline_remote_auto_compact_task;
@@ -2099,9 +2100,10 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         compacted_history: Vec<ResponseItem>,
+        phase: AutoCompactPhase,
     ) -> Vec<ResponseItem> {
         let initial_context = self.build_initial_context(turn_context).await;
-        compact::process_compacted_history(compacted_history, &initial_context)
+        compact::process_compacted_history(compacted_history, &initial_context, phase)
     }
 
     /// Append ResponseItems to the in-memory conversation history only.
@@ -3758,16 +3760,37 @@ pub(crate) async fn run_turn(
     let model_info = turn_context.model_info.clone();
     let auto_compact_limit = model_info.auto_compact_token_limit().unwrap_or(i64::MAX);
     let total_usage_tokens = sess.get_total_token_usage().await;
+    let incoming_user_tokens = estimate_user_input_token_count(&input);
 
     let event = EventMsg::TurnStarted(TurnStartedEvent {
         model_context_window: turn_context.model_context_window(),
         collaboration_mode_kind: turn_context.collaboration_mode.mode,
     });
     sess.send_event(&turn_context, event).await;
-    if total_usage_tokens >= auto_compact_limit
-        && run_auto_compact(&sess, &turn_context).await.is_err()
-    {
-        return None;
+    if is_projected_turn_usage_over_auto_compact_limit(
+        total_usage_tokens,
+        incoming_user_tokens,
+        auto_compact_limit,
+    ) {
+        if run_auto_compact(&sess, &turn_context, AutoCompactPhase::PreTurn)
+            .await
+            .is_err()
+        {
+            return None;
+        }
+
+        let total_usage_tokens_after_compact = sess.get_total_token_usage().await;
+        if is_over_limit_due_to_incoming_user_tokens(
+            total_usage_tokens_after_compact,
+            incoming_user_tokens,
+            auto_compact_limit,
+        ) {
+            let event = EventMsg::Error(CodexErr::ContextWindowExceeded.to_error_event(Some(
+                "Incoming user message is too large to fit after auto-compaction".to_string(),
+            )));
+            sess.send_event(&turn_context, event).await;
+            return None;
+        }
     }
 
     let skills_outcome = Some(
@@ -3950,7 +3973,10 @@ pub(crate) async fn run_turn(
 
                 // as long as compaction works well in getting us way below the token limit, we shouldn't worry about being in an infinite loop.
                 if token_limit_reached && needs_follow_up {
-                    if run_auto_compact(&sess, &turn_context).await.is_err() {
+                    if run_auto_compact(&sess, &turn_context, AutoCompactPhase::MidTurnContinuation)
+                        .await
+                        .is_err()
+                    {
                         return None;
                     }
                     continue;
@@ -4010,11 +4036,67 @@ pub(crate) async fn run_turn(
     last_agent_message
 }
 
-async fn run_auto_compact(sess: &Arc<Session>, turn_context: &Arc<TurnContext>) -> CodexResult<()> {
+fn estimate_user_input_token_count(input: &[UserInput]) -> i64 {
+    input
+        .iter()
+        .map(estimate_single_user_input_token_count)
+        .fold(0i64, i64::saturating_add)
+}
+
+fn estimate_single_user_input_token_count(input: &UserInput) -> i64 {
+    fn estimate_text(text: &str) -> i64 {
+        i64::try_from(crate::truncate::approx_token_count(text)).unwrap_or(i64::MAX)
+    }
+
+    match input {
+        UserInput::Text { text, .. } => estimate_text(text),
+        UserInput::Image { image_url } => estimate_text(image_url),
+        UserInput::LocalImage { path } => estimate_text(path.to_string_lossy().as_ref()),
+        UserInput::Skill { name, path } => {
+            estimate_text(name).saturating_add(estimate_text(path.to_string_lossy().as_ref()))
+        }
+        UserInput::Mention { name, path } => {
+            estimate_text(name).saturating_add(estimate_text(path))
+        }
+        _ => 0,
+    }
+}
+
+fn is_projected_turn_usage_over_auto_compact_limit(
+    total_usage_tokens: i64,
+    incoming_user_tokens: i64,
+    auto_compact_limit: i64,
+) -> bool {
+    if auto_compact_limit == i64::MAX {
+        return false;
+    }
+
+    total_usage_tokens.saturating_add(incoming_user_tokens) >= auto_compact_limit
+}
+
+fn is_over_limit_due_to_incoming_user_tokens(
+    total_usage_tokens: i64,
+    incoming_user_tokens: i64,
+    auto_compact_limit: i64,
+) -> bool {
+    total_usage_tokens < auto_compact_limit
+        && is_projected_turn_usage_over_auto_compact_limit(
+            total_usage_tokens,
+            incoming_user_tokens,
+            auto_compact_limit,
+        )
+}
+
+async fn run_auto_compact(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    phase: AutoCompactPhase,
+) -> CodexResult<()> {
     if should_use_remote_compact_task(&turn_context.provider) {
-        run_inline_remote_auto_compact_task(Arc::clone(sess), Arc::clone(turn_context)).await?;
+        run_inline_remote_auto_compact_task(Arc::clone(sess), Arc::clone(turn_context), phase)
+            .await?;
     } else {
-        run_inline_auto_compact_task(Arc::clone(sess), Arc::clone(turn_context)).await?;
+        run_inline_auto_compact_task(Arc::clone(sess), Arc::clone(turn_context), phase).await?;
     }
     Ok(())
 }
@@ -5074,6 +5156,37 @@ mod tests {
             end_turn: None,
             phase: None,
         }
+    }
+
+    #[test]
+    fn pre_turn_projection_uses_incoming_user_tokens_for_compaction() {
+        assert!(is_projected_turn_usage_over_auto_compact_limit(90, 15, 100));
+        assert!(!is_projected_turn_usage_over_auto_compact_limit(90, 9, 100));
+    }
+
+    #[test]
+    fn pre_turn_projection_does_not_compact_with_unbounded_limit() {
+        assert!(!is_projected_turn_usage_over_auto_compact_limit(
+            i64::MAX - 1,
+            100,
+            i64::MAX,
+        ));
+    }
+
+    #[test]
+    fn incoming_user_limit_error_only_triggers_when_message_pushes_over_limit() {
+        assert!(is_over_limit_due_to_incoming_user_tokens(95, 10, 100));
+        assert!(!is_over_limit_due_to_incoming_user_tokens(100, 10, 100));
+        assert!(!is_over_limit_due_to_incoming_user_tokens(80, 10, 100));
+    }
+
+    #[test]
+    fn estimate_user_input_token_count_is_positive_for_text_input() {
+        let input = vec![UserInput::Text {
+            text: "hello".to_string(),
+            text_elements: Vec::new(),
+        }];
+        assert!(estimate_user_input_token_count(&input) > 0);
     }
 
     fn make_connector(id: &str, name: &str) -> AppInfo {
