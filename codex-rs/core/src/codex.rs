@@ -4060,12 +4060,10 @@ fn estimate_single_user_input_token_count(input: &UserInput) -> i64 {
         UserInput::Text { text, .. } => estimate_text(text),
         UserInput::Image { image_url } => estimate_text(image_url),
         UserInput::LocalImage { path } => estimate_text(path.to_string_lossy().as_ref()),
-        UserInput::Skill { name, path } => {
-            estimate_text(name).saturating_add(estimate_text(path.to_string_lossy().as_ref()))
-        }
-        UserInput::Mention { name, path } => {
-            estimate_text(name).saturating_add(estimate_text(path))
-        }
+        // Structured skill/mention selections are not serialized into the user
+        // prompt payload (tool bodies are injected separately later), so they
+        // should not count toward pre-turn prompt projection.
+        UserInput::Skill { .. } | UserInput::Mention { .. } => 0,
         _ => 0,
     }
 }
@@ -5195,6 +5193,21 @@ mod tests {
             text_elements: Vec::new(),
         }];
         assert!(estimate_user_input_token_count(&input) > 0);
+    }
+
+    #[test]
+    fn estimate_user_input_token_count_ignores_skill_and_mention_inputs() {
+        let input = vec![
+            UserInput::Skill {
+                name: "test-skill".to_string(),
+                path: PathBuf::from("/tmp/skills/test/SKILL.md"),
+            },
+            UserInput::Mention {
+                name: "notion".to_string(),
+                path: "app://notion".to_string(),
+            },
+        ];
+        assert_eq!(estimate_user_input_token_count(&input), 0);
     }
 
     fn make_connector(id: &str, name: &str) -> AppInfo {
