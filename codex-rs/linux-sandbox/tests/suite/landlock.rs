@@ -196,10 +196,14 @@ async fn test_writable_root() {
 
 #[tokio::test]
 async fn test_no_new_privs_is_enabled() {
+    // On non-aarch64 CI we've seen this sandboxed `grep` take just over the 200ms short timeout
+    // (~203ms), so give this test a little extra headroom to avoid jittery failures.
+    let timeout_ms = SHORT_TIMEOUT_MS.max(300);
+
     let output = run_cmd_output(
         &["bash", "-lc", "grep '^NoNewPrivs:' /proc/self/status"],
         &[],
-        SHORT_TIMEOUT_MS,
+        timeout_ms,
     )
     .await;
     let line = output
