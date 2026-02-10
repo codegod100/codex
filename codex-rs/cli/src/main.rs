@@ -13,6 +13,7 @@ use codex_cli::login::read_api_key_from_stdin;
 use codex_cli::login::run_login_status;
 use codex_cli::login::run_login_with_api_key;
 use codex_cli::login::run_login_with_chatgpt;
+use codex_cli::login::run_login_with_copilot;
 use codex_cli::login::run_login_with_device_code;
 use codex_cli::login::run_logout;
 use codex_cloud_tasks::Cli as CloudTasksCli;
@@ -274,6 +275,17 @@ struct LoginCommand {
 
     #[arg(long = "device-auth")]
     use_device_code: bool,
+
+    #[arg(long = "copilot")]
+    copilot: bool,
+
+    /// EXPERIMENTAL: Override OAuth client ID for Copilot device code login.
+    #[arg(
+        long = "experimental_copilot_client-id",
+        value_name = "CLIENT_ID",
+        hide = true
+    )]
+    copilot_client_id: Option<String>,
 
     /// EXPERIMENTAL: Use custom OAuth issuer base URL (advanced)
     /// Override the OAuth issuer base URL (advanced)
@@ -672,7 +684,13 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                     run_login_status(login_cli.config_overrides).await;
                 }
                 None => {
-                    if login_cli.use_device_code {
+                    if login_cli.copilot {
+                        run_login_with_copilot(
+                            login_cli.config_overrides,
+                            login_cli.copilot_client_id,
+                        )
+                        .await;
+                    } else if login_cli.use_device_code {
                         run_login_with_device_code(
                             login_cli.config_overrides,
                             login_cli.issuer_base_url,

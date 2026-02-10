@@ -6,6 +6,8 @@
 //!      key. These override or extend the defaults at runtime.
 
 use crate::auth::AuthMode;
+use crate::auth::GITHUB_TOKEN_ENV_VAR;
+use crate::auth::load_copilot_access_token_from_default_home;
 use crate::error::EnvVarError;
 use codex_api::Provider as ApiProvider;
 use codex_api::provider::RetryConfig as ApiRetryConfig;
@@ -27,6 +29,7 @@ const MAX_STREAM_MAX_RETRIES: u64 = 100;
 const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
+const COPILOT_PROVIDER_NAME: &str = "GitHub Copilot";
 const CHAT_WIRE_API_REMOVED_ERROR: &str = "`wire_api = \"chat\"` is no longer supported.\nHow to fix: set `wire_api = \"responses\"` in your provider config.\nMore info: https://github.com/openai/codex/discussions/7782";
 pub(crate) const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
 pub(crate) const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
@@ -180,10 +183,18 @@ impl ModelProviderInfo {
     pub fn api_key(&self) -> crate::error::Result<Option<String>> {
         match &self.env_key {
             Some(env_key) => {
-                let api_key = std::env::var(env_key)
-                    .ok()
-                    .filter(|v| !v.trim().is_empty())
-                    .ok_or_else(|| {
+                let api_key = if let Ok(value) = std::env::var(env_key) {
+                    if value.trim().is_empty() {
+                        None
+                    } else {
+                        Some(value)
+                    }
+                } else if env_key == GITHUB_TOKEN_ENV_VAR {
+                    load_copilot_access_token_from_default_home().ok().flatten()
+                } else {
+                    None
+                }
+                .ok_or_else(|| {
                         crate::error::CodexErr::EnvVar(EnvVarError {
                             var: env_key.clone(),
                             instructions: self.env_key_instructions.clone(),
@@ -259,6 +270,30 @@ impl ModelProviderInfo {
     pub fn is_openai(&self) -> bool {
         self.name == OPENAI_PROVIDER_NAME
     }
+
+    pub fn create_copilot_provider() -> ModelProviderInfo {
+        ModelProviderInfo {
+            name: COPILOT_PROVIDER_NAME.into(),
+            base_url: std::env::var("GITHUB_COPILOT_BASE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .or_else(|| Some("https://api.githubcopilot.com/v1".to_string())),
+            env_key: Some("GITHUB_TOKEN".to_string()),
+            env_key_instructions: Some(
+                "Run `codex login --copilot` or set GITHUB_TOKEN to a token with access to GitHub Copilot models.".to_string(),
+            ),
+            experimental_bearer_token: None,
+            wire_api: WireApi::Responses,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            requires_openai_auth: false,
+            supports_websockets: false,
+        }
+    }
 }
 
 pub const DEFAULT_LMSTUDIO_PORT: u16 = 1234;
@@ -266,17 +301,18 @@ pub const DEFAULT_OLLAMA_PORT: u16 = 11434;
 
 pub const LMSTUDIO_OSS_PROVIDER_ID: &str = "lmstudio";
 pub const OLLAMA_OSS_PROVIDER_ID: &str = "ollama";
+pub const COPILOT_PROVIDER_ID: &str = "copilot";
 
 /// Built-in default provider list.
 pub fn built_in_model_providers() -> HashMap<String, ModelProviderInfo> {
     use ModelProviderInfo as P;
 
-    // We do not want to be in the business of adjucating which third-party
-    // providers are bundled with Codex CLI, so we only include the OpenAI and
-    // open source ("oss") providers by default. Users are encouraged to add to
-    // `model_providers` in config.toml to add their own providers.
+    // We intentionally keep built-ins small and practical: first-party defaults
+    // plus providers needed for common local and Copilot-backed setups.
+    // Users can add any other providers in `model_providers`.
     [
         ("openai", P::create_openai_provider()),
+        (COPILOT_PROVIDER_ID, P::create_copilot_provider()),
         (
             OLLAMA_OSS_PROVIDER_ID,
             create_oss_provider(DEFAULT_OLLAMA_PORT, WireApi::Responses),
@@ -437,5 +473,20 @@ wire_api = "chat"
 
         let err = toml::from_str::<ModelProviderInfo>(provider_toml).unwrap_err();
         assert!(err.to_string().contains(CHAT_WIRE_API_REMOVED_ERROR));
+    }
+
+    #[test]
+    fn builtins_include_copilot_provider() {
+        let providers = built_in_model_providers();
+        let copilot = providers
+            .get(COPILOT_PROVIDER_ID)
+            .expect("copilot provider should exist");
+        assert_eq!(copilot.name, COPILOT_PROVIDER_NAME);
+        assert_eq!(
+            copilot.base_url.as_deref(),
+            Some("https://api.githubcopilot.com/v1")
+        );
+        assert_eq!(copilot.env_key.as_deref(), Some("GITHUB_TOKEN"));
+        assert!(!copilot.requires_openai_auth);
     }
 }

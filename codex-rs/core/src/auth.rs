@@ -356,6 +356,13 @@ impl ChatgptAuth {
 
 pub const OPENAI_API_KEY_ENV_VAR: &str = "OPENAI_API_KEY";
 pub const CODEX_API_KEY_ENV_VAR: &str = "CODEX_API_KEY";
+pub const GITHUB_TOKEN_ENV_VAR: &str = "GITHUB_TOKEN";
+const COPILOT_AUTH_JSON_FILENAME: &str = "copilot_auth.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CopilotAuthDotJson {
+    access_token: String,
+}
 
 pub fn read_openai_api_key_from_env() -> Option<String> {
     env::var(OPENAI_API_KEY_ENV_VAR)
@@ -369,6 +376,63 @@ pub fn read_codex_api_key_from_env() -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// Writes Copilot OAuth access token under `copilot_auth.json` inside `codex_home`.
+pub fn login_with_copilot_access_token(
+    codex_home: &Path,
+    access_token: &str,
+) -> std::io::Result<()> {
+    let payload = CopilotAuthDotJson {
+        access_token: access_token.trim().to_string(),
+    };
+
+    if payload.access_token.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Copilot access token is empty",
+        ));
+    }
+
+    std::fs::create_dir_all(codex_home)?;
+    let path = codex_home.join(COPILOT_AUTH_JSON_FILENAME);
+    let serialized = serde_json::to_string_pretty(&payload)
+        .map_err(|err| std::io::Error::other(format!("serialize copilot auth: {err}")))?;
+    std::fs::write(path, serialized)
+}
+
+/// Returns stored Copilot OAuth access token from `copilot_auth.json` if present.
+pub fn load_copilot_access_token(codex_home: &Path) -> std::io::Result<Option<String>> {
+    let path = codex_home.join(COPILOT_AUTH_JSON_FILENAME);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let raw = std::fs::read_to_string(path)?;
+    let parsed: CopilotAuthDotJson = serde_json::from_str(&raw)
+        .map_err(|err| std::io::Error::other(format!("parse copilot auth json: {err}")))?;
+    let token = parsed.access_token.trim().to_string();
+    if token.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(token))
+}
+
+/// Returns stored Copilot OAuth access token from the default codex home path.
+pub fn load_copilot_access_token_from_default_home() -> std::io::Result<Option<String>> {
+    let codex_home = crate::config::find_codex_home()?;
+    load_copilot_access_token(&codex_home)
+}
+
+/// Deletes `copilot_auth.json` if it exists. Returns true when removed.
+pub fn logout_copilot(codex_home: &Path) -> std::io::Result<bool> {
+    let path = codex_home.join(COPILOT_AUTH_JSON_FILENAME);
+    if path.exists() {
+        std::fs::remove_file(path)?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// Delete the auth.json file inside `codex_home` if it exists. Returns `Ok(true)`
@@ -1370,6 +1434,30 @@ mod tests {
             .expect("auth.json should parse");
         assert_eq!(auth.openai_api_key.as_deref(), Some("sk-new"));
         assert!(auth.tokens.is_none(), "tokens should be cleared");
+    }
+
+    #[test]
+    fn copilot_token_round_trips_in_codex_home() {
+        let dir = tempdir().unwrap();
+
+        login_with_copilot_access_token(dir.path(), "ghu_test_token")
+            .expect("should save copilot token");
+        let loaded = load_copilot_access_token(dir.path()).expect("should load copilot token");
+        assert_eq!(loaded.as_deref(), Some("ghu_test_token"));
+
+        let removed = logout_copilot(dir.path()).expect("should delete copilot token");
+        assert!(removed);
+
+        let loaded_after_delete =
+            load_copilot_access_token(dir.path()).expect("should read after delete");
+        assert_eq!(loaded_after_delete, None);
+    }
+
+    #[test]
+    fn copilot_token_rejects_empty_value() {
+        let dir = tempdir().unwrap();
+        let err = login_with_copilot_access_token(dir.path(), "  ").expect_err("should reject");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]
