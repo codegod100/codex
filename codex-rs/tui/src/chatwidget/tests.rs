@@ -95,6 +95,7 @@ use insta::assert_snapshot;
 use pretty_assertions::assert_eq;
 #[cfg(target_os = "windows")]
 use serial_test::serial;
+use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
@@ -847,6 +848,7 @@ async fn review_restores_context_window_indicator() {
         msg: EventMsg::TokenCount(TokenCountEvent {
             info: Some(make_token_info(pre_review_tokens, context_window)),
             rate_limits: None,
+            rate_limit_name: None,
         }),
     });
     assert_eq!(chat.bottom_pane.context_window_percent(), Some(30));
@@ -866,6 +868,7 @@ async fn review_restores_context_window_indicator() {
         msg: EventMsg::TokenCount(TokenCountEvent {
             info: Some(make_token_info(review_tokens, context_window)),
             rate_limits: None,
+            rate_limit_name: None,
         }),
     });
     assert_eq!(chat.bottom_pane.context_window_percent(), Some(97));
@@ -895,6 +898,7 @@ async fn token_count_none_resets_context_indicator() {
         msg: EventMsg::TokenCount(TokenCountEvent {
             info: Some(make_token_info(pre_compact_tokens, context_window)),
             rate_limits: None,
+            rate_limit_name: None,
         }),
     });
     assert_eq!(chat.bottom_pane.context_window_percent(), Some(30));
@@ -904,6 +908,7 @@ async fn token_count_none_resets_context_indicator() {
         msg: EventMsg::TokenCount(TokenCountEvent {
             info: None,
             rate_limits: None,
+            rate_limit_name: None,
         }),
     });
     assert_eq!(chat.bottom_pane.context_window_percent(), None);
@@ -934,6 +939,7 @@ async fn context_indicator_shows_used_tokens_when_window_unknown() {
         msg: EventMsg::TokenCount(TokenCountEvent {
             info: Some(token_info),
             rate_limits: None,
+            rate_limit_name: None,
         }),
     });
 
@@ -1056,6 +1062,7 @@ async fn make_chatwidget_manual(
         initial_user_message: None,
         token_info: None,
         rate_limit_snapshot: None,
+        rate_limit_snapshots_by_name: BTreeMap::new(),
         plan_type: None,
         rate_limit_warnings: RateLimitWarningState::default(),
         rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
@@ -1269,16 +1276,19 @@ async fn test_rate_limit_warnings_monthly() {
 async fn rate_limit_snapshot_keeps_prior_credits_when_missing_from_headers() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
 
-    chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
-        primary: None,
-        secondary: None,
-        credits: Some(CreditsSnapshot {
-            has_credits: true,
-            unlimited: false,
-            balance: Some("17.5".to_string()),
+    chat.on_rate_limit_snapshot(
+        Some(RateLimitSnapshot {
+            primary: None,
+            secondary: None,
+            credits: Some(CreditsSnapshot {
+                has_credits: true,
+                unlimited: false,
+                balance: Some("17.5".to_string()),
+            }),
+            plan_type: None,
         }),
-        plan_type: None,
-    }));
+        None,
+    );
     let initial_balance = chat
         .rate_limit_snapshot
         .as_ref()
@@ -1286,16 +1296,19 @@ async fn rate_limit_snapshot_keeps_prior_credits_when_missing_from_headers() {
         .and_then(|credits| credits.balance.as_deref());
     assert_eq!(initial_balance, Some("17.5"));
 
-    chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
-        primary: Some(RateLimitWindow {
-            used_percent: 80.0,
-            window_minutes: Some(60),
-            resets_at: Some(123),
+    chat.on_rate_limit_snapshot(
+        Some(RateLimitSnapshot {
+            primary: Some(RateLimitWindow {
+                used_percent: 80.0,
+                window_minutes: Some(60),
+                resets_at: Some(123),
+            }),
+            secondary: None,
+            credits: None,
+            plan_type: None,
         }),
-        secondary: None,
-        credits: None,
-        plan_type: None,
-    }));
+        None,
+    );
 
     let display = chat
         .rate_limit_snapshot
@@ -1318,52 +1331,61 @@ async fn rate_limit_snapshot_keeps_prior_credits_when_missing_from_headers() {
 async fn rate_limit_snapshot_updates_and_retains_plan_type() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
 
-    chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
-        primary: Some(RateLimitWindow {
-            used_percent: 10.0,
-            window_minutes: Some(60),
-            resets_at: None,
+    chat.on_rate_limit_snapshot(
+        Some(RateLimitSnapshot {
+            primary: Some(RateLimitWindow {
+                used_percent: 10.0,
+                window_minutes: Some(60),
+                resets_at: None,
+            }),
+            secondary: Some(RateLimitWindow {
+                used_percent: 5.0,
+                window_minutes: Some(300),
+                resets_at: None,
+            }),
+            credits: None,
+            plan_type: Some(PlanType::Plus),
         }),
-        secondary: Some(RateLimitWindow {
-            used_percent: 5.0,
-            window_minutes: Some(300),
-            resets_at: None,
-        }),
-        credits: None,
-        plan_type: Some(PlanType::Plus),
-    }));
+        None,
+    );
     assert_eq!(chat.plan_type, Some(PlanType::Plus));
 
-    chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
-        primary: Some(RateLimitWindow {
-            used_percent: 25.0,
-            window_minutes: Some(30),
-            resets_at: Some(123),
+    chat.on_rate_limit_snapshot(
+        Some(RateLimitSnapshot {
+            primary: Some(RateLimitWindow {
+                used_percent: 25.0,
+                window_minutes: Some(30),
+                resets_at: Some(123),
+            }),
+            secondary: Some(RateLimitWindow {
+                used_percent: 15.0,
+                window_minutes: Some(300),
+                resets_at: Some(234),
+            }),
+            credits: None,
+            plan_type: Some(PlanType::Pro),
         }),
-        secondary: Some(RateLimitWindow {
-            used_percent: 15.0,
-            window_minutes: Some(300),
-            resets_at: Some(234),
-        }),
-        credits: None,
-        plan_type: Some(PlanType::Pro),
-    }));
+        None,
+    );
     assert_eq!(chat.plan_type, Some(PlanType::Pro));
 
-    chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
-        primary: Some(RateLimitWindow {
-            used_percent: 30.0,
-            window_minutes: Some(60),
-            resets_at: Some(456),
+    chat.on_rate_limit_snapshot(
+        Some(RateLimitSnapshot {
+            primary: Some(RateLimitWindow {
+                used_percent: 30.0,
+                window_minutes: Some(60),
+                resets_at: Some(456),
+            }),
+            secondary: Some(RateLimitWindow {
+                used_percent: 18.0,
+                window_minutes: Some(300),
+                resets_at: Some(567),
+            }),
+            credits: None,
+            plan_type: None,
         }),
-        secondary: Some(RateLimitWindow {
-            used_percent: 18.0,
-            window_minutes: Some(300),
-            resets_at: Some(567),
-        }),
-        credits: None,
-        plan_type: None,
-    }));
+        None,
+    );
     assert_eq!(chat.plan_type, Some(PlanType::Pro));
 }
 
@@ -1373,7 +1395,7 @@ async fn rate_limit_switch_prompt_skips_when_on_lower_cost_model() {
     chat.auth_manager =
         AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
 
-    chat.on_rate_limit_snapshot(Some(snapshot(95.0)));
+    chat.on_rate_limit_snapshot(Some(snapshot(95.0)), None);
 
     assert!(matches!(
         chat.rate_limit_switch_prompt,
@@ -1387,7 +1409,7 @@ async fn rate_limit_switch_prompt_shows_once_per_session() {
     let (mut chat, _, _) = make_chatwidget_manual(Some("gpt-5")).await;
     chat.auth_manager = AuthManager::from_auth_for_testing(auth);
 
-    chat.on_rate_limit_snapshot(Some(snapshot(90.0)));
+    chat.on_rate_limit_snapshot(Some(snapshot(90.0)), None);
     assert!(
         chat.rate_limit_warnings.primary_index >= 1,
         "warnings not emitted"
@@ -1398,7 +1420,7 @@ async fn rate_limit_switch_prompt_shows_once_per_session() {
         RateLimitSwitchPromptState::Shown
     ));
 
-    chat.on_rate_limit_snapshot(Some(snapshot(95.0)));
+    chat.on_rate_limit_snapshot(Some(snapshot(95.0)), None);
     assert!(matches!(
         chat.rate_limit_switch_prompt,
         RateLimitSwitchPromptState::Shown
@@ -1412,7 +1434,7 @@ async fn rate_limit_switch_prompt_respects_hidden_notice() {
     chat.auth_manager = AuthManager::from_auth_for_testing(auth);
     chat.config.notices.hide_rate_limit_model_nudge = Some(true);
 
-    chat.on_rate_limit_snapshot(Some(snapshot(95.0)));
+    chat.on_rate_limit_snapshot(Some(snapshot(95.0)), None);
 
     assert!(matches!(
         chat.rate_limit_switch_prompt,
@@ -1427,7 +1449,7 @@ async fn rate_limit_switch_prompt_defers_until_task_complete() {
     chat.auth_manager = AuthManager::from_auth_for_testing(auth);
 
     chat.bottom_pane.set_task_running(true);
-    chat.on_rate_limit_snapshot(Some(snapshot(90.0)));
+    chat.on_rate_limit_snapshot(Some(snapshot(90.0)), None);
     assert!(matches!(
         chat.rate_limit_switch_prompt,
         RateLimitSwitchPromptState::Pending
@@ -1447,7 +1469,7 @@ async fn rate_limit_switch_prompt_popup_snapshot() {
     chat.auth_manager =
         AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
 
-    chat.on_rate_limit_snapshot(Some(snapshot(92.0)));
+    chat.on_rate_limit_snapshot(Some(snapshot(92.0)), None);
     chat.maybe_show_pending_rate_limit_prompt();
 
     let popup = render_bottom_popup(&chat, 80);
@@ -1770,7 +1792,7 @@ async fn plan_implementation_popup_skips_when_rate_limit_prompt_pending() {
             status: StepStatus::Pending,
         }],
     });
-    chat.on_rate_limit_snapshot(Some(snapshot(92.0)));
+    chat.on_rate_limit_snapshot(Some(snapshot(92.0)), None);
     chat.on_task_complete(None, false);
 
     let popup = render_bottom_popup(&chat, 80);

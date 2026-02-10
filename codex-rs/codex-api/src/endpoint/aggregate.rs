@@ -57,8 +57,8 @@ impl Stream for AggregatedStream {
                 Poll::Ready(Some(Ok(ResponseEvent::ServerReasoningIncluded(included)))) => {
                     return Poll::Ready(Some(Ok(ResponseEvent::ServerReasoningIncluded(included))));
                 }
-                Poll::Ready(Some(Ok(ResponseEvent::RateLimits(snapshot)))) => {
-                    return Poll::Ready(Some(Ok(ResponseEvent::RateLimits(snapshot))));
+                Poll::Ready(Some(Ok(ResponseEvent::RateLimits(update)))) => {
+                    return Poll::Ready(Some(Ok(ResponseEvent::RateLimits(update))));
                 }
                 Poll::Ready(Some(Ok(ResponseEvent::ModelsEtag(etag)))) => {
                     return Poll::Ready(Some(Ok(ResponseEvent::ModelsEtag(etag))));

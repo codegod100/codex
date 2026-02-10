@@ -86,6 +86,8 @@ impl RateLimitWindowDisplay {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RateLimitSnapshotDisplay {
+    /// Canonical limit identifier (for example: `codex` or `codex_other`).
+    pub limit_name: String,
     /// Local timestamp representing when this display snapshot was captured.
     pub captured_at: DateTime<Local>,
     /// Primary usage window (typically short duration).
@@ -111,11 +113,21 @@ pub(crate) struct CreditsSnapshotDisplay {
 ///
 /// Pass the timestamp from the same observation point as `snapshot`; supplying a significantly
 /// older or newer `captured_at` can produce misleading reset labels and stale classification.
+#[cfg(test)]
 pub(crate) fn rate_limit_snapshot_display(
     snapshot: &RateLimitSnapshot,
     captured_at: DateTime<Local>,
 ) -> RateLimitSnapshotDisplay {
+    rate_limit_snapshot_display_for_limit(snapshot, "codex".to_string(), captured_at)
+}
+
+pub(crate) fn rate_limit_snapshot_display_for_limit(
+    snapshot: &RateLimitSnapshot,
+    limit_name: String,
+    captured_at: DateTime<Local>,
+) -> RateLimitSnapshotDisplay {
     RateLimitSnapshotDisplay {
+        limit_name,
         captured_at,
         primary: snapshot
             .primary
@@ -148,57 +160,78 @@ pub(crate) fn compose_rate_limit_data(
     now: DateTime<Local>,
 ) -> StatusRateLimitData {
     match snapshot {
-        Some(snapshot) => {
-            let mut rows = Vec::with_capacity(3);
-
-            if let Some(primary) = snapshot.primary.as_ref() {
-                let label: String = primary
-                    .window_minutes
-                    .map(get_limits_duration)
-                    .unwrap_or_else(|| "5h".to_string());
-                let label = capitalize_first(&label);
-                rows.push(StatusRateLimitRow {
-                    label: format!("{label} limit"),
-                    value: StatusRateLimitValue::Window {
-                        percent_used: primary.used_percent,
-                        resets_at: primary.resets_at.clone(),
-                    },
-                });
-            }
-
-            if let Some(secondary) = snapshot.secondary.as_ref() {
-                let label: String = secondary
-                    .window_minutes
-                    .map(get_limits_duration)
-                    .unwrap_or_else(|| "weekly".to_string());
-                let label = capitalize_first(&label);
-                rows.push(StatusRateLimitRow {
-                    label: format!("{label} limit"),
-                    value: StatusRateLimitValue::Window {
-                        percent_used: secondary.used_percent,
-                        resets_at: secondary.resets_at.clone(),
-                    },
-                });
-            }
-
-            if let Some(credits) = snapshot.credits.as_ref()
-                && let Some(row) = credit_status_row(credits)
-            {
-                rows.push(row);
-            }
-
-            let is_stale = now.signed_duration_since(snapshot.captured_at)
-                > ChronoDuration::minutes(RATE_LIMIT_STALE_THRESHOLD_MINUTES);
-
-            if rows.is_empty() {
-                StatusRateLimitData::Available(vec![])
-            } else if is_stale {
-                StatusRateLimitData::Stale(rows)
-            } else {
-                StatusRateLimitData::Available(rows)
-            }
-        }
+        Some(snapshot) => compose_rate_limit_data_many(std::slice::from_ref(snapshot), now),
         None => StatusRateLimitData::Missing,
+    }
+}
+
+pub(crate) fn compose_rate_limit_data_many(
+    snapshots: &[RateLimitSnapshotDisplay],
+    now: DateTime<Local>,
+) -> StatusRateLimitData {
+    if snapshots.is_empty() {
+        return StatusRateLimitData::Missing;
+    }
+
+    let mut rows = Vec::with_capacity(snapshots.len().saturating_mul(3));
+    let mut stale = false;
+
+    for snapshot in snapshots {
+        stale |= now.signed_duration_since(snapshot.captured_at)
+            > ChronoDuration::minutes(RATE_LIMIT_STALE_THRESHOLD_MINUTES);
+
+        let limit_bucket_label = snapshot.limit_name.clone();
+        let show_limit_prefix = !limit_bucket_label.eq_ignore_ascii_case("codex");
+        if show_limit_prefix {
+            rows.push(StatusRateLimitRow {
+                label: format!("{limit_bucket_label} limit"),
+                value: StatusRateLimitValue::Text(String::new()),
+            });
+        }
+
+        if let Some(primary) = snapshot.primary.as_ref() {
+            let label: String = primary
+                .window_minutes
+                .map(get_limits_duration)
+                .unwrap_or_else(|| "5h".to_string());
+            let label = capitalize_first(&label);
+            rows.push(StatusRateLimitRow {
+                label: format!("{label} limit"),
+                value: StatusRateLimitValue::Window {
+                    percent_used: primary.used_percent,
+                    resets_at: primary.resets_at.clone(),
+                },
+            });
+        }
+
+        if let Some(secondary) = snapshot.secondary.as_ref() {
+            let label: String = secondary
+                .window_minutes
+                .map(get_limits_duration)
+                .unwrap_or_else(|| "weekly".to_string());
+            let label = capitalize_first(&label);
+            rows.push(StatusRateLimitRow {
+                label: format!("{label} limit"),
+                value: StatusRateLimitValue::Window {
+                    percent_used: secondary.used_percent,
+                    resets_at: secondary.resets_at.clone(),
+                },
+            });
+        }
+
+        if let Some(credits) = snapshot.credits.as_ref()
+            && let Some(row) = credit_status_row(credits)
+        {
+            rows.push(row);
+        }
+    }
+
+    if rows.is_empty() {
+        StatusRateLimitData::Available(vec![])
+    } else if stale {
+        StatusRateLimitData::Stale(rows)
+    } else {
+        StatusRateLimitData::Available(rows)
     }
 }
 
@@ -265,4 +298,68 @@ fn format_credit_balance(raw: &str) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CreditsSnapshotDisplay;
+    use super::RateLimitSnapshotDisplay;
+    use super::RateLimitWindowDisplay;
+    use super::StatusRateLimitData;
+    use super::compose_rate_limit_data_many;
+    use chrono::Local;
+    use pretty_assertions::assert_eq;
+
+    fn window(used_percent: f64) -> RateLimitWindowDisplay {
+        RateLimitWindowDisplay {
+            used_percent,
+            resets_at: Some("soon".to_string()),
+            window_minutes: Some(300),
+        }
+    }
+
+    #[test]
+    fn non_codex_limits_render_group_row() {
+        let now = Local::now();
+        let codex = RateLimitSnapshotDisplay {
+            limit_name: "codex".to_string(),
+            captured_at: now,
+            primary: Some(window(10.0)),
+            secondary: None,
+            credits: Some(CreditsSnapshotDisplay {
+                has_credits: true,
+                unlimited: false,
+                balance: Some("25".to_string()),
+            }),
+        };
+        let other = RateLimitSnapshotDisplay {
+            limit_name: "codex-other".to_string(),
+            captured_at: now,
+            primary: Some(window(20.0)),
+            secondary: None,
+            credits: Some(CreditsSnapshotDisplay {
+                has_credits: true,
+                unlimited: false,
+                balance: Some("99".to_string()),
+            }),
+        };
+
+        let rows = match compose_rate_limit_data_many(&[codex, other], now) {
+            StatusRateLimitData::Available(rows) => rows,
+            other => panic!("unexpected status: {other:?}"),
+        };
+
+        let labels: Vec<String> = rows.iter().map(|row| row.label.clone()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "5h limit".to_string(),
+                "Credits".to_string(),
+                "codex-other limit".to_string(),
+                "5h limit".to_string(),
+                "Credits".to_string(),
+            ]
+        );
+        assert_eq!(rows.iter().filter(|row| row.label == "Credits").count(), 2);
+    }
 }

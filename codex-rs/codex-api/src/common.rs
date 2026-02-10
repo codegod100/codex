@@ -14,6 +14,12 @@ use std::task::Context;
 use std::task::Poll;
 use tokio::sync::mpsc;
 
+#[derive(Debug, Clone)]
+pub struct RateLimitUpdate {
+    pub snapshot: RateLimitSnapshot,
+    pub limit_name: Option<String>,
+}
+
 /// Canonical prompt input for Responses endpoints.
 #[derive(Debug, Clone)]
 pub struct Prompt {
@@ -90,7 +96,7 @@ pub enum ResponseEvent {
     ReasoningSummaryPartAdded {
         summary_index: i64,
     },
-    RateLimits(RateLimitSnapshot),
+    RateLimits(RateLimitUpdate),
     ModelsEtag(String),
 }
 

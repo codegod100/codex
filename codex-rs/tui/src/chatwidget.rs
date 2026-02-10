@@ -25,6 +25,7 @@
 //! the final answer. During streaming we hide the status row to avoid duplicate
 //! progress indicators; once commentary completes and stream queues drain, we
 //! re-show it so users still see turn-in-progress state between output bursts.
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -41,6 +42,7 @@ use crate::bottom_pane::StatusLineSetupView;
 use crate::status::RateLimitWindowDisplay;
 use crate::status::format_directory_display;
 use crate::status::format_tokens_compact;
+use crate::status::rate_limit_snapshot_display_for_limit;
 use crate::text_formatting::proper_join;
 use crate::version::CODEX_CLI_VERSION;
 use codex_app_server_protocol::ConfigLayerSource;
@@ -89,6 +91,7 @@ use codex_core::protocol::McpToolCallEndEvent;
 use codex_core::protocol::Op;
 use codex_core::protocol::PatchApplyBeginEvent;
 use codex_core::protocol::RateLimitSnapshot;
+use codex_core::protocol::RateLimitWindow;
 use codex_core::protocol::ReviewRequest;
 use codex_core::protocol::ReviewTarget;
 use codex_core::protocol::SkillMetadata as ProtocolSkillMetadata;
@@ -512,6 +515,7 @@ pub(crate) struct ChatWidget {
     initial_user_message: Option<UserMessage>,
     token_info: Option<TokenUsageInfo>,
     rate_limit_snapshot: Option<RateLimitSnapshotDisplay>,
+    rate_limit_snapshots_by_name: BTreeMap<String, RateLimitSnapshotDisplay>,
     plan_type: Option<PlanType>,
     rate_limit_warnings: RateLimitWarningState,
     rate_limit_switch_prompt: RateLimitSwitchPromptState,
@@ -1492,17 +1496,32 @@ impl ChatWidget {
         }
     }
 
-    pub(crate) fn on_rate_limit_snapshot(&mut self, snapshot: Option<RateLimitSnapshot>) {
+    pub(crate) fn on_rate_limit_snapshot(
+        &mut self,
+        snapshot: Option<RateLimitSnapshot>,
+        rate_limit_name: Option<String>,
+    ) {
         if let Some(mut snapshot) = snapshot {
+            let limit_name = rate_limit_name.unwrap_or_else(|| "codex".to_string());
             if snapshot.credits.is_none() {
                 snapshot.credits = self
-                    .rate_limit_snapshot
-                    .as_ref()
+                    .rate_limit_snapshots_by_name
+                    .get(&limit_name)
                     .and_then(|display| display.credits.as_ref())
                     .map(|credits| CreditsSnapshot {
                         has_credits: credits.has_credits,
                         unlimited: credits.unlimited,
                         balance: credits.balance.clone(),
+                    })
+                    .or_else(|| {
+                        self.rate_limit_snapshot
+                            .as_ref()
+                            .and_then(|display| display.credits.as_ref())
+                            .map(|credits| CreditsSnapshot {
+                                has_credits: credits.has_credits,
+                                unlimited: credits.unlimited,
+                                balance: credits.balance.clone(),
+                            })
                     });
             }
 
@@ -1546,7 +1565,10 @@ impl ChatWidget {
                 self.rate_limit_switch_prompt = RateLimitSwitchPromptState::Pending;
             }
 
-            let display = crate::status::rate_limit_snapshot_display(&snapshot, Local::now());
+            let display =
+                rate_limit_snapshot_display_for_limit(&snapshot, limit_name.clone(), Local::now());
+            self.rate_limit_snapshots_by_name
+                .insert(limit_name, display.clone());
             self.rate_limit_snapshot = Some(display);
 
             if !warnings.is_empty() {
@@ -1557,6 +1579,7 @@ impl ChatWidget {
             }
         } else {
             self.rate_limit_snapshot = None;
+            self.rate_limit_snapshots_by_name.clear();
         }
         self.refresh_status_line();
     }
@@ -2611,6 +2634,7 @@ impl ChatWidget {
             initial_user_message,
             token_info: None,
             rate_limit_snapshot: None,
+            rate_limit_snapshots_by_name: BTreeMap::new(),
             plan_type: None,
             rate_limit_warnings: RateLimitWarningState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
@@ -2775,6 +2799,7 @@ impl ChatWidget {
             initial_user_message,
             token_info: None,
             rate_limit_snapshot: None,
+            rate_limit_snapshots_by_name: BTreeMap::new(),
             plan_type: None,
             rate_limit_warnings: RateLimitWarningState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
@@ -2928,6 +2953,7 @@ impl ChatWidget {
             initial_user_message,
             token_info: None,
             rate_limit_snapshot: None,
+            rate_limit_snapshots_by_name: BTreeMap::new(),
             plan_type: None,
             rate_limit_warnings: RateLimitWarningState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
@@ -3933,7 +3959,7 @@ impl ChatWidget {
             }
             EventMsg::TokenCount(ev) => {
                 self.set_token_info(ev.info);
-                self.on_rate_limit_snapshot(ev.rate_limits);
+                self.on_rate_limit_snapshot(ev.rate_limits, ev.rate_limit_name);
             }
             EventMsg::Warning(WarningEvent { message }) => self.on_warning(message),
             EventMsg::Error(ErrorEvent {
@@ -4221,7 +4247,8 @@ impl ChatWidget {
             .unwrap_or(&default_usage);
         let collaboration_mode = self.collaboration_mode_label();
         let reasoning_effort_override = Some(self.effective_reasoning_effort());
-        self.add_to_history(crate::status::new_status_output(
+        let rate_limit_snapshots = self.status_preview_rate_limit_fixtures();
+        self.add_to_history(crate::status::new_status_output_with_rate_limits(
             &self.config,
             self.auth_manager.as_ref(),
             token_info,
@@ -4229,13 +4256,59 @@ impl ChatWidget {
             &self.thread_id,
             self.thread_name.clone(),
             self.forked_from,
-            self.rate_limit_snapshot.as_ref(),
+            rate_limit_snapshots.as_slice(),
             self.plan_type,
             Local::now(),
             self.model_display_name(),
             collaboration_mode,
             reasoning_effort_override,
         ));
+    }
+
+    // TODO(draft-testing-only): Remove this fixture path and switch `/status` back to live
+    // rate-limit snapshots before shipping. This is only for draft local testing/demo output.
+    fn status_preview_rate_limit_fixtures(&self) -> Vec<RateLimitSnapshotDisplay> {
+        let now = Local::now();
+        let now_ts = now.timestamp();
+
+        let codex = RateLimitSnapshot {
+            primary: Some(RateLimitWindow {
+                used_percent: 41.0,
+                window_minutes: Some(300),
+                resets_at: Some(now_ts + 60 * 90),
+            }),
+            secondary: Some(RateLimitWindow {
+                used_percent: 76.0,
+                window_minutes: Some(60 * 24 * 7),
+                resets_at: Some(now_ts + 60 * 60 * 24 * 3),
+            }),
+            credits: Some(CreditsSnapshot {
+                has_credits: true,
+                unlimited: false,
+                balance: Some("1200".to_string()),
+            }),
+            plan_type: self.plan_type,
+        };
+
+        let codex_other = RateLimitSnapshot {
+            primary: Some(RateLimitWindow {
+                used_percent: 58.0,
+                window_minutes: Some(300),
+                resets_at: Some(now_ts + 60 * 35),
+            }),
+            secondary: Some(RateLimitWindow {
+                used_percent: 88.0,
+                window_minutes: Some(60 * 24 * 7),
+                resets_at: Some(now_ts + 60 * 60 * 24 * 2),
+            }),
+            credits: None,
+            plan_type: self.plan_type,
+        };
+
+        vec![
+            rate_limit_snapshot_display_for_limit(&codex, "codex".to_string(), now),
+            rate_limit_snapshot_display_for_limit(&codex_other, "codex_other".to_string(), now),
+        ]
     }
 
     pub(crate) fn add_debug_config_output(&mut self) {

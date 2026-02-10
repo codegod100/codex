@@ -1,9 +1,11 @@
+use crate::common::RateLimitUpdate;
 use codex_protocol::account::PlanType;
 use codex_protocol::protocol::CreditsSnapshot;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
 use http::HeaderMap;
 use serde::Deserialize;
+use std::collections::BTreeSet;
 use std::fmt::Display;
 
 #[derive(Debug)]
@@ -19,18 +21,60 @@ impl Display for RateLimitError {
 
 /// Parses the bespoke Codex rate-limit headers into a `RateLimitSnapshot`.
 pub fn parse_rate_limit(headers: &HeaderMap) -> Option<RateLimitSnapshot> {
+    parse_rate_limit_for_limit(headers, None)
+}
+
+/// Parses all known rate-limit header families into update records keyed by limit name.
+pub fn parse_rate_limit_updates(headers: &HeaderMap) -> Vec<RateLimitUpdate> {
+    let mut limit_names: BTreeSet<String> = BTreeSet::new();
+    limit_names.insert("codex".to_string());
+
+    for name in headers.keys() {
+        let header_name = name.as_str().to_ascii_lowercase();
+        if let Some(limit_name) = header_name_to_limit_name(&header_name) {
+            limit_names.insert(limit_name);
+        }
+    }
+
+    limit_names
+        .into_iter()
+        .filter_map(|limit_name| {
+            let snapshot = parse_rate_limit_for_limit(headers, Some(limit_name.as_str()))?;
+            has_rate_limit_data(&snapshot).then_some(RateLimitUpdate {
+                snapshot,
+                limit_name: Some(limit_name),
+            })
+        })
+        .collect()
+}
+
+/// Parses rate-limit headers for the provided limit name.
+///
+/// `limit_name` should match the server-provided metered limit name (e.g. `codex`,
+/// `codex_other`). When omitted, this defaults to the legacy `codex` header family.
+pub fn parse_rate_limit_for_limit(
+    headers: &HeaderMap,
+    limit_name: Option<&str>,
+) -> Option<RateLimitSnapshot> {
+    let normalized_limit = limit_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("codex")
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    let prefix = format!("x-{normalized_limit}");
     let primary = parse_rate_limit_window(
         headers,
-        "x-codex-primary-used-percent",
-        "x-codex-primary-window-minutes",
-        "x-codex-primary-reset-at",
+        &format!("{prefix}-primary-used-percent"),
+        &format!("{prefix}-primary-window-minutes"),
+        &format!("{prefix}-primary-reset-at"),
     );
 
     let secondary = parse_rate_limit_window(
         headers,
-        "x-codex-secondary-used-percent",
-        "x-codex-secondary-window-minutes",
-        "x-codex-secondary-reset-at",
+        &format!("{prefix}-secondary-used-percent"),
+        &format!("{prefix}-secondary-window-minutes"),
+        &format!("{prefix}-secondary-reset-at"),
     );
 
     let credits = parse_credits_snapshot(headers);
@@ -70,9 +114,11 @@ struct RateLimitEvent {
     plan_type: Option<PlanType>,
     rate_limits: Option<RateLimitEventDetails>,
     credits: Option<RateLimitEventCredits>,
+    metered_limit_name: Option<String>,
+    limit_name: Option<String>,
 }
 
-pub fn parse_rate_limit_event(payload: &str) -> Option<RateLimitSnapshot> {
+pub fn parse_rate_limit_event(payload: &str) -> Option<RateLimitUpdate> {
     let event: RateLimitEvent = serde_json::from_str(payload).ok()?;
     if event.kind != "codex.rate_limits" {
         return None;
@@ -90,11 +136,18 @@ pub fn parse_rate_limit_event(payload: &str) -> Option<RateLimitSnapshot> {
         unlimited: credits.unlimited,
         balance: credits.balance,
     });
-    Some(RateLimitSnapshot {
-        primary,
-        secondary,
-        credits,
-        plan_type: event.plan_type,
+    let limit_name = event
+        .metered_limit_name
+        .or(event.limit_name)
+        .map(normalize_limit_name);
+    Some(RateLimitUpdate {
+        snapshot: RateLimitSnapshot {
+            primary,
+            secondary,
+            credits,
+            plan_type: event.plan_type,
+        },
+        limit_name,
     })
 }
 
@@ -177,4 +230,91 @@ fn parse_header_bool(headers: &HeaderMap, name: &str) -> Option<bool> {
 
 fn parse_header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name)?.to_str().ok()
+}
+
+fn has_rate_limit_data(snapshot: &RateLimitSnapshot) -> bool {
+    snapshot.primary.is_some() || snapshot.secondary.is_some() || snapshot.credits.is_some()
+}
+
+fn header_name_to_limit_name(header_name: &str) -> Option<String> {
+    let suffix = "-primary-used-percent";
+    let prefix = header_name.strip_suffix(suffix)?;
+    let limit = prefix.strip_prefix("x-")?;
+    Some(normalize_limit_name(limit.to_string()))
+}
+
+fn normalize_limit_name(name: impl Into<String>) -> String {
+    name.into().trim().to_ascii_lowercase().replace('-', "_")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::HeaderValue;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn parse_rate_limit_for_limit_defaults_to_codex_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-primary-used-percent",
+            HeaderValue::from_static("12.5"),
+        );
+        headers.insert(
+            "x-codex-primary-window-minutes",
+            HeaderValue::from_static("60"),
+        );
+        headers.insert(
+            "x-codex-primary-reset-at",
+            HeaderValue::from_static("1704069000"),
+        );
+
+        let snapshot = parse_rate_limit_for_limit(&headers, None).expect("snapshot");
+        let primary = snapshot.primary.expect("primary");
+        assert_eq!(primary.used_percent, 12.5);
+        assert_eq!(primary.window_minutes, Some(60));
+        assert_eq!(primary.resets_at, Some(1704069000));
+    }
+
+    #[test]
+    fn parse_rate_limit_for_limit_reads_secondary_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-secondary-primary-used-percent",
+            HeaderValue::from_static("80"),
+        );
+        headers.insert(
+            "x-codex-secondary-primary-window-minutes",
+            HeaderValue::from_static("1440"),
+        );
+        headers.insert(
+            "x-codex-secondary-primary-reset-at",
+            HeaderValue::from_static("1704074400"),
+        );
+
+        let snapshot = parse_rate_limit_for_limit(&headers, Some("codex_other")).expect("snapshot");
+        let primary = snapshot.primary.expect("primary");
+        assert_eq!(primary.used_percent, 80.0);
+        assert_eq!(primary.window_minutes, Some(1440));
+        assert_eq!(primary.resets_at, Some(1704074400));
+        assert_eq!(snapshot.secondary, None);
+    }
+
+    #[test]
+    fn parse_rate_limit_updates_reads_all_limit_families() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-primary-used-percent",
+            HeaderValue::from_static("12.5"),
+        );
+        headers.insert(
+            "x-codex-secondary-primary-used-percent",
+            HeaderValue::from_static("80"),
+        );
+
+        let updates = parse_rate_limit_updates(&headers);
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].limit_name.as_deref(), Some("codex"));
+        assert_eq!(updates[1].limit_name.as_deref(), Some("codex_other"));
+    }
 }

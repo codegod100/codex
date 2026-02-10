@@ -402,8 +402,8 @@ async fn run_websocket_response_stream(
                     }
                 };
                 if event.kind() == "codex.rate_limits" {
-                    if let Some(snapshot) = parse_rate_limit_event(&text) {
-                        let _ = tx_event.send(Ok(ResponseEvent::RateLimits(snapshot))).await;
+                    if let Some(update) = parse_rate_limit_event(&text) {
+                        let _ = tx_event.send(Ok(ResponseEvent::RateLimits(update))).await;
                     }
                     continue;
                 }

@@ -2320,10 +2320,11 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         new_rate_limits: RateLimitSnapshot,
+        limit_name: Option<String>,
     ) {
         {
             let mut state = self.state.lock().await;
-            state.set_rate_limits(new_rate_limits);
+            state.set_rate_limits(new_rate_limits, limit_name);
         }
         self.send_token_count_event(turn_context).await;
     }
@@ -2357,11 +2358,15 @@ impl Session {
     }
 
     async fn send_token_count_event(&self, turn_context: &TurnContext) {
-        let (info, rate_limits) = {
+        let (info, rate_limits, rate_limit_name) = {
             let state = self.state.lock().await;
             state.token_info_and_rate_limits()
         };
-        let event = EventMsg::TokenCount(TokenCountEvent { info, rate_limits });
+        let event = EventMsg::TokenCount(TokenCountEvent {
+            info,
+            rate_limits,
+            rate_limit_name,
+        });
         self.send_event(turn_context, event).await;
     }
 
@@ -4223,7 +4228,8 @@ async fn run_sampling_request(
             Err(CodexErr::UsageLimitReached(e)) => {
                 let rate_limits = e.rate_limits.clone();
                 if let Some(rate_limits) = rate_limits {
-                    sess.update_rate_limits(&turn_context, rate_limits).await;
+                    sess.update_rate_limits(&turn_context, rate_limits, e.limit_name.clone())
+                        .await;
                 }
                 return Err(CodexErr::UsageLimitReached(e));
             }
@@ -4851,10 +4857,11 @@ async fn try_run_sampling_request(
             ResponseEvent::ServerReasoningIncluded(included) => {
                 sess.set_server_reasoning_included(included).await;
             }
-            ResponseEvent::RateLimits(snapshot) => {
+            ResponseEvent::RateLimits(update) => {
                 // Update internal state with latest rate limits, but defer sending until
                 // token usage is available to avoid duplicate TokenCount events.
-                sess.update_rate_limits(&turn_context, snapshot).await;
+                sess.update_rate_limits(&turn_context, update.snapshot, update.limit_name)
+                    .await;
             }
             ResponseEvent::ModelsEtag(etag) => {
                 // Update internal state with latest models etag
@@ -5438,24 +5445,28 @@ mod tests {
             TokenCountEvent {
                 info: Some(info1),
                 rate_limits: None,
+                rate_limit_name: None,
             },
         )));
         rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
             TokenCountEvent {
                 info: None,
                 rate_limits: None,
+                rate_limit_name: None,
             },
         )));
         rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
             TokenCountEvent {
                 info: Some(info2.clone()),
                 rate_limits: None,
+                rate_limit_name: None,
             },
         )));
         rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
             TokenCountEvent {
                 info: None,
                 rate_limits: None,
+                rate_limit_name: None,
             },
         )));
 
@@ -5714,7 +5725,7 @@ mod tests {
             }),
             plan_type: Some(codex_protocol::account::PlanType::Plus),
         };
-        state.set_rate_limits(initial.clone());
+        state.set_rate_limits(initial.clone(), Some("codex".to_string()));
 
         let update = RateLimitSnapshot {
             primary: Some(RateLimitWindow {
@@ -5730,7 +5741,7 @@ mod tests {
             credits: None,
             plan_type: None,
         };
-        state.set_rate_limits(update.clone());
+        state.set_rate_limits(update.clone(), Some("codex_other".to_string()));
 
         assert_eq!(
             state.latest_rate_limits,
@@ -5801,7 +5812,7 @@ mod tests {
             }),
             plan_type: Some(codex_protocol::account::PlanType::Plus),
         };
-        state.set_rate_limits(initial.clone());
+        state.set_rate_limits(initial.clone(), Some("codex".to_string()));
 
         let update = RateLimitSnapshot {
             primary: Some(RateLimitWindow {
@@ -5813,7 +5824,7 @@ mod tests {
             credits: None,
             plan_type: Some(codex_protocol::account::PlanType::Pro),
         };
-        state.set_rate_limits(update.clone());
+        state.set_rate_limits(update.clone(), Some("codex".to_string()));
 
         assert_eq!(
             state.latest_rate_limits,

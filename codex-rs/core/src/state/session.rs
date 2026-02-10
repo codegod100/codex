@@ -17,6 +17,7 @@ pub(crate) struct SessionState {
     pub(crate) session_configuration: SessionConfiguration,
     pub(crate) history: ContextManager,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
+    pub(crate) latest_rate_limit_name: Option<String>,
     pub(crate) server_reasoning_included: bool,
     pub(crate) dependency_env: HashMap<String, String>,
     pub(crate) mcp_dependency_prompted: HashSet<String>,
@@ -40,6 +41,7 @@ impl SessionState {
             session_configuration,
             history,
             latest_rate_limits: None,
+            latest_rate_limit_name: None,
             server_reasoning_included: false,
             dependency_env: HashMap::new(),
             mcp_dependency_prompted: HashSet::new(),
@@ -84,17 +86,30 @@ impl SessionState {
         self.history.token_info()
     }
 
-    pub(crate) fn set_rate_limits(&mut self, snapshot: RateLimitSnapshot) {
+    pub(crate) fn set_rate_limits(
+        &mut self,
+        snapshot: RateLimitSnapshot,
+        limit_name: Option<String>,
+    ) {
         self.latest_rate_limits = Some(merge_rate_limit_fields(
             self.latest_rate_limits.as_ref(),
             snapshot,
         ));
+        self.latest_rate_limit_name = limit_name;
     }
 
     pub(crate) fn token_info_and_rate_limits(
         &self,
-    ) -> (Option<TokenUsageInfo>, Option<RateLimitSnapshot>) {
-        (self.token_info(), self.latest_rate_limits.clone())
+    ) -> (
+        Option<TokenUsageInfo>,
+        Option<RateLimitSnapshot>,
+        Option<String>,
+    ) {
+        (
+            self.token_info(),
+            self.latest_rate_limits.clone(),
+            self.latest_rate_limit_name.clone(),
+        )
     }
 
     pub(crate) fn set_token_usage_full(&mut self, context_window: i64) {
