@@ -30,6 +30,7 @@ const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
 const COPILOT_PROVIDER_NAME: &str = "GitHub Copilot";
+const OPENROUTER_PROVIDER_NAME: &str = "OpenRouter";
 const CHAT_WIRE_API_REMOVED_ERROR: &str = "`wire_api = \"chat\"` is no longer supported.\nHow to fix: set `wire_api = \"responses\"` in your provider config.\nMore info: https://github.com/openai/codex/discussions/7782";
 pub(crate) const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
 pub(crate) const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
@@ -294,6 +295,40 @@ impl ModelProviderInfo {
             supports_websockets: false,
         }
     }
+
+    pub fn create_openrouter_provider() -> ModelProviderInfo {
+        ModelProviderInfo {
+            name: OPENROUTER_PROVIDER_NAME.into(),
+            base_url: std::env::var("OPENROUTER_BASE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .or_else(|| Some("https://openrouter.ai/api/v1".to_string())),
+            env_key: Some("OPENROUTER_API_KEY".to_string()),
+            env_key_instructions: Some(
+                "Set OPENROUTER_API_KEY to your OpenRouter API key.".to_string(),
+            ),
+            experimental_bearer_token: None,
+            wire_api: WireApi::Responses,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: Some(
+                [
+                    (
+                        "HTTP-Referer".to_string(),
+                        "OPENROUTER_HTTP_REFERER".to_string(),
+                    ),
+                    ("X-Title".to_string(), "OPENROUTER_X_TITLE".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            requires_openai_auth: false,
+            supports_websockets: false,
+        }
+    }
 }
 
 pub const DEFAULT_LMSTUDIO_PORT: u16 = 1234;
@@ -302,6 +337,7 @@ pub const DEFAULT_OLLAMA_PORT: u16 = 11434;
 pub const LMSTUDIO_OSS_PROVIDER_ID: &str = "lmstudio";
 pub const OLLAMA_OSS_PROVIDER_ID: &str = "ollama";
 pub const COPILOT_PROVIDER_ID: &str = "copilot";
+pub const OPENROUTER_PROVIDER_ID: &str = "openrouter";
 
 /// Built-in default provider list.
 pub fn built_in_model_providers() -> HashMap<String, ModelProviderInfo> {
@@ -313,6 +349,7 @@ pub fn built_in_model_providers() -> HashMap<String, ModelProviderInfo> {
     [
         ("openai", P::create_openai_provider()),
         (COPILOT_PROVIDER_ID, P::create_copilot_provider()),
+        (OPENROUTER_PROVIDER_ID, P::create_openrouter_provider()),
         (
             OLLAMA_OSS_PROVIDER_ID,
             create_oss_provider(DEFAULT_OLLAMA_PORT, WireApi::Responses),
@@ -488,5 +525,20 @@ wire_api = "chat"
         );
         assert_eq!(copilot.env_key.as_deref(), Some("GITHUB_TOKEN"));
         assert!(!copilot.requires_openai_auth);
+    }
+
+    #[test]
+    fn builtins_include_openrouter_provider() {
+        let providers = built_in_model_providers();
+        let openrouter = providers
+            .get(OPENROUTER_PROVIDER_ID)
+            .expect("openrouter provider should exist");
+        assert_eq!(openrouter.name, OPENROUTER_PROVIDER_NAME);
+        assert_eq!(
+            openrouter.base_url.as_deref(),
+            Some("https://openrouter.ai/api/v1")
+        );
+        assert_eq!(openrouter.env_key.as_deref(), Some("OPENROUTER_API_KEY"));
+        assert!(!openrouter.requires_openai_auth);
     }
 }
