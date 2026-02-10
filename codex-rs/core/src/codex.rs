@@ -4746,6 +4746,27 @@ async fn run_sampling_request(
     skills_outcome: Option<&SkillLoadOutcome>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<SamplingRequestResult> {
+    fn is_transient_overload_error(err: &CodexErr) -> bool {
+        match err {
+            CodexErr::InternalServerError | CodexErr::RetryLimit(_) => true,
+            CodexErr::Stream(message, _) => {
+                let lower = message.to_ascii_lowercase();
+                lower.contains("high demand")
+                    || lower.contains("temporar")
+                    || lower.contains("overload")
+                    || lower.contains("rate limit")
+                    || lower.contains("stream disconnected")
+            }
+            _ => false,
+        }
+    }
+
+    fn overload_backoff(attempt: u64) -> std::time::Duration {
+        backoff(attempt)
+            .max(std::time::Duration::from_secs(2))
+            .min(std::time::Duration::from_secs(20))
+    }
+
     let router = built_tools(
         sess.as_ref(),
         turn_context.as_ref(),
@@ -4772,6 +4793,8 @@ async fn run_sampling_request(
     };
 
     let mut retries = 0;
+    let retry_window_started_at = std::time::Instant::now();
+    let overload_retry_budget = std::time::Duration::from_secs(90);
     loop {
         let err = match try_run_sampling_request(
             Arc::clone(&router),
@@ -4802,7 +4825,8 @@ async fn run_sampling_request(
             Err(err) => err,
         };
 
-        if !err.is_retryable() {
+        let is_transient_overload = is_transient_overload_error(&err);
+        if !err.is_retryable() && !is_transient_overload {
             return Err(err);
         }
 
@@ -4822,16 +4846,29 @@ async fn run_sampling_request(
             retries = 0;
             continue;
         }
-        if retries < max_retries {
+        let within_retry_limit = retries < max_retries;
+        let within_overload_budget =
+            is_transient_overload && retry_window_started_at.elapsed() <= overload_retry_budget;
+        if within_retry_limit || within_overload_budget {
             retries += 1;
             let delay = match &err {
-                CodexErr::Stream(_, requested_delay) => {
-                    requested_delay.unwrap_or_else(|| backoff(retries))
+                CodexErr::Stream(_, requested_delay) => requested_delay.unwrap_or_else(|| {
+                    if is_transient_overload {
+                        overload_backoff(retries)
+                    } else {
+                        backoff(retries)
+                    }
+                }),
+                _ => {
+                    if is_transient_overload {
+                        overload_backoff(retries)
+                    } else {
+                        backoff(retries)
+                    }
                 }
-                _ => backoff(retries),
             };
             warn!(
-                "stream disconnected - retrying sampling request ({retries}/{max_retries} in {delay:?})...",
+                "stream disconnected - retrying sampling request ({retries}/{max_retries} in {delay:?}, overload_retry={is_transient_overload})...",
             );
 
             // In release builds, hide the first websocket retry notification to reduce noisy
@@ -5550,7 +5587,10 @@ async fn try_run_sampling_request(
                             .await;
                     }
                 } else {
-                    error_or_panic("OutputTextDelta without active item".to_string());
+                    warn!(
+                        turn_id = %turn_context.sub_id,
+                        "Ignoring OutputTextDelta without active item"
+                    );
                 }
             }
             ResponseEvent::ReasoningSummaryDelta {
@@ -5568,7 +5608,10 @@ async fn try_run_sampling_request(
                     sess.send_event(&turn_context, EventMsg::ReasoningContentDelta(event))
                         .await;
                 } else {
-                    error_or_panic("ReasoningSummaryDelta without active item".to_string());
+                    warn!(
+                        turn_id = %turn_context.sub_id,
+                        "Ignoring ReasoningSummaryDelta without active item"
+                    );
                 }
             }
             ResponseEvent::ReasoningSummaryPartAdded { summary_index } => {
@@ -5580,7 +5623,10 @@ async fn try_run_sampling_request(
                         });
                     sess.send_event(&turn_context, event).await;
                 } else {
-                    error_or_panic("ReasoningSummaryPartAdded without active item".to_string());
+                    warn!(
+                        turn_id = %turn_context.sub_id,
+                        "Ignoring ReasoningSummaryPartAdded without active item"
+                    );
                 }
             }
             ResponseEvent::ReasoningContentDelta {
@@ -5598,7 +5644,10 @@ async fn try_run_sampling_request(
                     sess.send_event(&turn_context, EventMsg::ReasoningRawContentDelta(event))
                         .await;
                 } else {
-                    error_or_panic("ReasoningRawContentDelta without active item".to_string());
+                    warn!(
+                        turn_id = %turn_context.sub_id,
+                        "Ignoring ReasoningRawContentDelta without active item"
+                    );
                 }
             }
         }

@@ -23,9 +23,11 @@ use tokio::time::Instant;
 use tokio::time::timeout;
 use tokio_util::io::ReaderStream;
 use tracing::debug;
+use tracing::info;
 use tracing::trace;
 
 const X_REASONING_INCLUDED_HEADER: &str = "x-reasoning-included";
+static RESPONSES_SSE_DEBUG_ENABLED: OnceLock<bool> = OnceLock::new();
 
 /// Streams SSE events from an on-disk fixture for tests.
 pub fn stream_from_fixture(
@@ -337,6 +339,17 @@ pub async fn process_sse(
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn SseTelemetry>>,
 ) {
+    let sse_debug_enabled = *RESPONSES_SSE_DEBUG_ENABLED.get_or_init(|| {
+        std::env::var("CODEX_DEBUG_RESPONSES_SSE")
+            .ok()
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    });
     let mut stream = stream.eventsource();
     let mut response_error: Option<ApiError> = None;
 
@@ -369,6 +382,15 @@ pub async fn process_sse(
         };
 
         trace!("SSE event: {}", &sse.data);
+        if sse_debug_enabled {
+            let preview: String = sse.data.chars().take(4000).collect();
+            let truncated = sse.data.chars().count() > 4000;
+            info!(
+                raw = %preview,
+                truncated,
+                "responses_sse_raw_event"
+            );
+        }
 
         let event: ResponsesStreamEvent = match serde_json::from_str(&sse.data) {
             Ok(event) => event,
@@ -377,6 +399,23 @@ pub async fn process_sse(
                 continue;
             }
         };
+        if sse_debug_enabled {
+            info!(
+                kind = %event.kind(),
+                has_response = event.response.is_some(),
+                has_item = event.item.is_some(),
+                has_delta = event.delta.is_some(),
+                summary_index = ?event.summary_index,
+                content_index = ?event.content_index,
+                "responses_sse_parsed_event"
+            );
+            if event.kind() == "response.output_text.delta" {
+                info!(
+                    delta = ?event.delta.as_deref(),
+                    "responses_sse_output_text_delta_payload"
+                );
+            }
+        }
 
         match process_responses_event(event) {
             Ok(Some(event)) => {

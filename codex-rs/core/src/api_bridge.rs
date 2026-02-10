@@ -6,7 +6,9 @@ use codex_api::error::ApiError;
 use codex_api::rate_limits::parse_promo_message;
 use codex_api::rate_limits::parse_rate_limit_for_limit;
 use http::HeaderMap;
+use http::header::RETRY_AFTER;
 use serde::Deserialize;
+use std::time::Duration;
 
 use crate::auth::CodexAuth;
 use crate::error::CodexErr;
@@ -87,10 +89,13 @@ pub(crate) fn map_api_error(err: ApiError) -> CodexErr {
                         }
                     }
 
-                    CodexErr::RetryLimit(RetryLimitReachedError {
-                        status,
-                        request_id: extract_request_tracking_id(headers.as_ref()),
-                    })
+                    let delay = retry_after_delay(headers.as_ref());
+                    let message = if body_text.is_empty() {
+                        "Rate limit reached. Retrying.".to_string()
+                    } else {
+                        body_text
+                    };
+                    CodexErr::Stream(message, delay)
                 } else {
                     CodexErr::UnexpectedStatus(UnexpectedResponseError {
                         status,
@@ -219,10 +224,6 @@ mod tests {
     }
 }
 
-fn extract_request_tracking_id(headers: Option<&HeaderMap>) -> Option<String> {
-    extract_request_id(headers).or_else(|| extract_header(headers, CF_RAY_HEADER))
-}
-
 fn extract_request_id(headers: Option<&HeaderMap>) -> Option<String> {
     extract_header(headers, REQUEST_ID_HEADER)
         .or_else(|| extract_header(headers, OAI_REQUEST_ID_HEADER))
@@ -233,6 +234,22 @@ fn extract_header(headers: Option<&HeaderMap>, name: &str) -> Option<String> {
         map.get(name)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string)
+    })
+}
+
+fn retry_after_delay(headers: Option<&HeaderMap>) -> Option<Duration> {
+    let parse_secs = |value: &str| value.trim().parse::<u64>().ok().map(Duration::from_secs);
+    let parse_millis = |value: &str| value.trim().parse::<u64>().ok().map(Duration::from_millis);
+
+    headers.and_then(|map| {
+        map.get("retry-after-ms")
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_millis)
+            .or_else(|| {
+                map.get(RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(parse_secs)
+            })
     })
 }
 

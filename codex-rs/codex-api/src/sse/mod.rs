@@ -1,3 +1,4 @@
+pub mod chat_completions;
 pub mod responses;
 
 pub use responses::process_sse;

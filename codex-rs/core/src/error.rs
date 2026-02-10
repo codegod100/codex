@@ -206,7 +206,6 @@ impl CodexErr {
             | CodexErr::UnsupportedOperation(_)
             | CodexErr::Sandbox(_)
             | CodexErr::LandlockSandboxExecutableNotProvided
-            | CodexErr::RetryLimit(_)
             | CodexErr::ContextWindowExceeded
             | CodexErr::ThreadNotFound(_)
             | CodexErr::AgentLimitReached { .. }
@@ -220,6 +219,7 @@ impl CodexErr {
             | CodexErr::ResponseStreamFailed(_)
             | CodexErr::ConnectionFailed(_)
             | CodexErr::InternalServerError
+            | CodexErr::RetryLimit(_)
             | CodexErr::InternalAgentDied
             | CodexErr::Io(_)
             | CodexErr::Json(_)

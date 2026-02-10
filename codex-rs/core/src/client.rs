@@ -35,6 +35,9 @@ use crate::api_bridge::CoreAuthProvider;
 use crate::api_bridge::auth_provider_from_auth;
 use crate::api_bridge::map_api_error;
 use crate::auth::UnauthorizedRecovery;
+use codex_api::AggregateStreamExt;
+use codex_api::ChatCompletionsClient as ApiChatCompletionsClient;
+use codex_api::ChatCompletionsOptions as ApiChatCompletionsOptions;
 use codex_api::CompactClient as ApiCompactClient;
 use codex_api::CompactionInput as ApiCompactionInput;
 use codex_api::MemoriesClient as ApiMemoriesClient;
@@ -765,9 +768,68 @@ impl ModelClientSession {
 
             match stream_result {
                 Ok(stream) => {
+                    if !self.client.state.provider.is_openai() {
+                        // Some OpenAI-compatible providers emit text deltas without output_item
+                        // lifecycle events; aggregate preserves content via a completed message.
+                        let (stream, _) =
+                            map_response_stream(stream.aggregate(), otel_manager.clone());
+                        return Ok(stream);
+                    }
                     let (stream, _) = map_response_stream(stream, otel_manager.clone());
                     return Ok(stream);
                 }
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
+                    handle_unauthorized(unauthorized_transport, &mut auth_recovery).await?;
+                    continue;
+                }
+                Err(err) => return Err(map_api_error(err)),
+            }
+        }
+    }
+
+    /// Streams a turn via the legacy Chat Completions API.
+    #[allow(clippy::too_many_arguments)]
+    async fn stream_chat_completions_api(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        otel_manager: &OtelManager,
+        turn_metadata_header: Option<&str>,
+    ) -> Result<ResponseStream> {
+        let auth_manager = self.client.state.auth_manager.clone();
+        let api_prompt = Self::build_responses_request(prompt)?;
+        let mut auth_recovery = auth_manager
+            .as_ref()
+            .map(super::auth::AuthManager::unauthorized_recovery);
+        loop {
+            let client_setup = self.client.current_client_setup().await?;
+            let transport = ReqwestTransport::new(build_reqwest_client());
+            let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(otel_manager);
+            let client = ApiChatCompletionsClient::new(
+                transport,
+                client_setup.api_provider,
+                client_setup.api_auth,
+            )
+            .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+
+            let turn_metadata_header = parse_turn_metadata_header(turn_metadata_header);
+            let extra_headers = build_responses_headers(
+                self.client.state.beta_features_header.as_deref(),
+                None,
+                turn_metadata_header.as_ref(),
+            );
+
+            let options = ApiChatCompletionsOptions {
+                extra_headers,
+                stream: self.client.state.provider.stream_enabled(),
+            };
+            match client
+                .stream_prompt(&model_info.slug, &api_prompt, options)
+                .await
+            {
+                Ok(stream) => return Ok(map_response_stream(stream, otel_manager.clone())),
                 Err(ApiError::Transport(
                     unauthorized_transport @ TransportError::Http { status, .. },
                 )) if status == StatusCode::UNAUTHORIZED => {
@@ -920,6 +982,15 @@ impl ModelClientSession {
                     otel_manager,
                     effort,
                     summary,
+                    turn_metadata_header,
+                )
+                .await
+            }
+            WireApi::ChatCompletions => {
+                self.stream_chat_completions_api(
+                    prompt,
+                    model_info,
+                    otel_manager,
                     turn_metadata_header,
                 )
                 .await
