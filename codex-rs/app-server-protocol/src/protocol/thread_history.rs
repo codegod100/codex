@@ -7,8 +7,10 @@ use codex_protocol::protocol::AgentReasoningEvent;
 use codex_protocol::protocol::AgentReasoningRawContentEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
+use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::protocol::TurnAbortedEvent;
+use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::UserMessageEvent;
 
 /// Convert persisted [`EventMsg`] entries into a sequence of [`Turn`] values.
@@ -24,9 +26,22 @@ pub fn build_turns_from_event_msgs(events: &[EventMsg]) -> Vec<Turn> {
     builder.finish()
 }
 
+/// Convert persisted [`RolloutItem`] entries into a sequence of [`Turn`] values.
+///
+/// When available, this uses `TurnContext.turn_id` as the canonical turn id so
+/// resumed/rebuilt thread history preserves the original turn identifiers.
+pub fn build_turns_from_rollout_items(items: &[RolloutItem]) -> Vec<Turn> {
+    let mut builder = ThreadHistoryBuilder::new();
+    for item in items {
+        builder.handle_rollout_item(item);
+    }
+    builder.finish()
+}
+
 struct ThreadHistoryBuilder {
     turns: Vec<Turn>,
     current_turn: Option<PendingTurn>,
+    pending_turn_id: Option<String>,
     next_turn_index: i64,
     next_item_index: i64,
 }
@@ -36,6 +51,7 @@ impl ThreadHistoryBuilder {
         Self {
             turns: Vec::new(),
             current_turn: None,
+            pending_turn_id: None,
             next_turn_index: 1,
             next_item_index: 1,
         }
@@ -65,6 +81,34 @@ impl ThreadHistoryBuilder {
             EventMsg::TurnAborted(payload) => self.handle_turn_aborted(payload),
             _ => {}
         }
+    }
+
+    fn handle_rollout_item(&mut self, item: &RolloutItem) {
+        match item {
+            RolloutItem::TurnContext(payload) => self.handle_turn_context(payload),
+            RolloutItem::EventMsg(event) => self.handle_event(event),
+            RolloutItem::SessionMeta(_)
+            | RolloutItem::ResponseItem(_)
+            | RolloutItem::Compacted(_) => {}
+        }
+    }
+
+    fn handle_turn_context(&mut self, payload: &TurnContextItem) {
+        let Some(turn_id) = payload.turn_id.clone() else {
+            return;
+        };
+
+        if let Some(turn) = self.current_turn.as_mut() {
+            if turn.synthetic_id {
+                turn.id = turn_id;
+                turn.synthetic_id = false;
+            } else {
+                self.pending_turn_id = Some(turn_id);
+            }
+            return;
+        }
+
+        self.pending_turn_id = Some(turn_id);
     }
 
     fn handle_user_message(&mut self, payload: &UserMessageEvent) {
@@ -174,8 +218,11 @@ impl ThreadHistoryBuilder {
     }
 
     fn new_turn(&mut self) -> PendingTurn {
+        let turn_id = self.pending_turn_id.take();
+        let synthetic_id = turn_id.is_none();
         PendingTurn {
-            id: self.next_turn_id(),
+            id: turn_id.unwrap_or_else(|| self.next_turn_id()),
+            synthetic_id,
             items: Vec::new(),
             error: None,
             status: TurnStatus::Completed,
@@ -234,6 +281,7 @@ impl ThreadHistoryBuilder {
 
 struct PendingTurn {
     id: String,
+    synthetic_id: bool,
     items: Vec<ThreadItem>,
     error: Option<TurnError>,
     status: TurnStatus,
@@ -253,14 +301,38 @@ impl From<PendingTurn> for Turn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_protocol::config_types::ReasoningSummary;
     use codex_protocol::protocol::AgentMessageEvent;
     use codex_protocol::protocol::AgentReasoningEvent;
     use codex_protocol::protocol::AgentReasoningRawContentEvent;
+    use codex_protocol::protocol::AskForApproval;
+    use codex_protocol::protocol::RolloutItem;
+    use codex_protocol::protocol::SandboxPolicy;
     use codex_protocol::protocol::ThreadRolledBackEvent;
     use codex_protocol::protocol::TurnAbortReason;
     use codex_protocol::protocol::TurnAbortedEvent;
+    use codex_protocol::protocol::TurnContextItem;
     use codex_protocol::protocol::UserMessageEvent;
     use pretty_assertions::assert_eq;
+    use std::path::PathBuf;
+
+    fn turn_context(turn_id: Option<&str>) -> TurnContextItem {
+        TurnContextItem {
+            turn_id: turn_id.map(ToString::to_string),
+            cwd: PathBuf::from("/tmp"),
+            approval_policy: AskForApproval::OnRequest,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            model: "gpt-5".to_string(),
+            personality: None,
+            collaboration_mode: None,
+            effort: None,
+            summary: ReasoningSummary::Auto,
+            user_instructions: None,
+            developer_instructions: None,
+            final_output_json_schema: None,
+            truncation_policy: None,
+        }
+    }
 
     #[test]
     fn builds_multiple_turns_with_reasoning_items() {
@@ -570,5 +642,56 @@ mod tests {
 
         let turns = build_turns_from_event_msgs(&events);
         assert_eq!(turns, Vec::<Turn>::new());
+    }
+
+    #[test]
+    fn rebuild_uses_turn_context_turn_ids() {
+        let items = vec![
+            RolloutItem::TurnContext(turn_context(Some("uuid-turn-1"))),
+            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                message: "First".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            })),
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "A1".into(),
+            })),
+            RolloutItem::TurnContext(turn_context(Some("uuid-turn-2"))),
+            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                message: "Second".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            })),
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "A2".into(),
+            })),
+        ];
+
+        let turns = build_turns_from_rollout_items(&items);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].id, "uuid-turn-1");
+        assert_eq!(turns[1].id, "uuid-turn-2");
+    }
+
+    #[test]
+    fn rebuild_updates_synthetic_id_when_turn_context_arrives_late() {
+        let items = vec![
+            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                message: "First".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            })),
+            RolloutItem::TurnContext(turn_context(Some("uuid-turn-1"))),
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "A1".into(),
+            })),
+        ];
+
+        let turns = build_turns_from_rollout_items(&items);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].id, "uuid-turn-1");
     }
 }
