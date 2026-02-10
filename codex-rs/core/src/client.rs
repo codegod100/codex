@@ -951,7 +951,7 @@ impl ModelClientSession {
         summary: ReasoningSummaryConfig,
         turn_metadata_header: Option<&str>,
     ) -> Result<ResponseStream> {
-        let wire_api = self.client.state.provider.wire_api;
+        let wire_api = self.client.state.provider.wire_api_for_model(&model_info.slug);
         match wire_api {
             WireApi::Responses => {
                 let websocket_enabled = self.client.responses_websocket_enabled(model_info)

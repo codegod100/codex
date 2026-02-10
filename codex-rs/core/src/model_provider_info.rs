@@ -89,6 +89,13 @@ pub struct ModelProviderInfo {
     #[serde(default)]
     pub wire_api: WireApi,
 
+    /// Optional model-prefix overrides for wire protocol selection within this provider.
+    ///
+    /// Keys are matched as prefixes against the selected model slug. The longest matching
+    /// prefix wins. If no prefixes match, `wire_api` is used.
+    #[serde(default)]
+    pub wire_api_by_model: Option<HashMap<String, WireApi>>,
+
     /// Optional query parameters to append to the base URL.
     pub query_params: Option<HashMap<String, String>>,
 
@@ -156,6 +163,7 @@ impl ModelProviderInfo {
             env_key_instructions: env_key_instructions.map(str::to_string),
             experimental_bearer_token: None,
             wire_api: WireApi::Responses,
+            wire_api_by_model: None,
             query_params: None,
             http_headers: None,
             env_http_headers,
@@ -282,6 +290,19 @@ impl ModelProviderInfo {
         self.stream.unwrap_or(true)
     }
 
+    pub fn wire_api_for_model(&self, model: &str) -> WireApi {
+        self.wire_api_by_model
+            .as_ref()
+            .and_then(|wire_api_by_model| {
+                wire_api_by_model
+                    .iter()
+                    .filter(|(prefix, _)| model.starts_with(prefix.as_str()))
+                    .max_by_key(|(prefix, _)| prefix.len())
+                    .map(|(_, wire_api)| *wire_api)
+            })
+            .unwrap_or(self.wire_api)
+    }
+
     pub fn create_openai_provider() -> ModelProviderInfo {
         ModelProviderInfo {
             name: OPENAI_PROVIDER_NAME.into(),
@@ -297,6 +318,7 @@ impl ModelProviderInfo {
             env_key_instructions: None,
             experimental_bearer_token: None,
             wire_api: WireApi::Responses,
+            wire_api_by_model: None,
             query_params: None,
             http_headers: Some(
                 [("version".to_string(), env!("CARGO_PKG_VERSION").to_string())]
@@ -423,6 +445,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         env_key_instructions: None,
         experimental_bearer_token: None,
         wire_api,
+        wire_api_by_model: None,
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -453,6 +476,7 @@ base_url = "http://localhost:11434/v1"
             env_key_instructions: None,
             experimental_bearer_token: None,
             wire_api: WireApi::Responses,
+            wire_api_by_model: None,
             query_params: None,
             http_headers: None,
             env_http_headers: None,
@@ -483,6 +507,7 @@ query_params = { api-version = "2025-04-01-preview" }
             env_key_instructions: None,
             experimental_bearer_token: None,
             wire_api: WireApi::Responses,
+            wire_api_by_model: None,
             query_params: Some(maplit::hashmap! {
                 "api-version".to_string() => "2025-04-01-preview".to_string(),
             }),
@@ -516,6 +541,7 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
             env_key_instructions: None,
             experimental_bearer_token: None,
             wire_api: WireApi::Responses,
+            wire_api_by_model: None,
             query_params: None,
             http_headers: Some(maplit::hashmap! {
                 "X-Example-Header".to_string() => "example-value".to_string(),
@@ -559,6 +585,61 @@ wire_api = "chat_completions"
 
         let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
         assert_eq!(provider.wire_api, WireApi::ChatCompletions);
+    }
+
+    #[test]
+    fn test_deserialize_wire_api_by_model() {
+        let provider_toml = r#"
+name = "OpenAI compatible"
+base_url = "https://example.com/v1"
+env_key = "EXAMPLE_API_KEY"
+wire_api = "responses"
+wire_api_by_model = { "gpt-5" = "responses", "claude-" = "chat_completions" }
+        "#;
+
+        let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
+        assert_eq!(
+            provider.wire_api_by_model,
+            Some(maplit::hashmap! {
+                "gpt-5".to_string() => WireApi::Responses,
+                "claude-".to_string() => WireApi::ChatCompletions,
+            })
+        );
+    }
+
+    #[test]
+    fn test_wire_api_for_model_uses_longest_prefix_match() {
+        let provider = ModelProviderInfo {
+            name: "OpenAI compatible".into(),
+            base_url: Some("https://example.com/v1".into()),
+            env_key: Some("EXAMPLE_API_KEY".into()),
+            env_key_instructions: None,
+            experimental_bearer_token: None,
+            wire_api: WireApi::Responses,
+            wire_api_by_model: Some(maplit::hashmap! {
+                "claude-".to_string() => WireApi::ChatCompletions,
+                "claude-3-".to_string() => WireApi::Responses,
+            }),
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            requires_openai_auth: false,
+            supports_websockets: false,
+            stream: None,
+        };
+
+        assert_eq!(
+            provider.wire_api_for_model("claude-3-7-sonnet"),
+            WireApi::Responses
+        );
+        assert_eq!(
+            provider.wire_api_for_model("claude-opus"),
+            WireApi::ChatCompletions
+        );
+        assert_eq!(provider.wire_api_for_model("gpt-5"), WireApi::Responses);
     }
 
     #[test]
