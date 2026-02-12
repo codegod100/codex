@@ -1,7 +1,7 @@
 use crate::common::ResponseEvent;
 use crate::common::ResponseStream;
 use crate::error::ApiError;
-use crate::rate_limits::parse_rate_limit;
+use crate::rate_limits::parse_default_rate_limit;
 use crate::telemetry::SseTelemetry;
 use codex_client::ByteStream;
 use codex_client::StreamResponse;
@@ -90,7 +90,7 @@ pub fn spawn_chat_completions_stream(
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn SseTelemetry>>,
 ) -> ResponseStream {
-    let rate_limits = parse_rate_limit(&stream_response.headers);
+    let rate_limits = parse_default_rate_limit(&stream_response.headers);
     let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent, ApiError>>(1600);
     tokio::spawn(async move {
         if let Some(snapshot) = rate_limits {
@@ -179,6 +179,7 @@ pub async fn process_chat_completions_sse(
                 .send(Ok(ResponseEvent::Completed {
                     response_id: response_id.unwrap_or_default(),
                     token_usage: usage,
+                    can_append: false,
                 }))
                 .await;
             return;

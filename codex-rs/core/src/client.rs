@@ -796,15 +796,23 @@ impl ModelClientSession {
         prompt: &Prompt,
         model_info: &ModelInfo,
         otel_manager: &OtelManager,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
         turn_metadata_header: Option<&str>,
     ) -> Result<ResponseStream> {
         let auth_manager = self.client.state.auth_manager.clone();
-        let api_prompt = Self::build_responses_request(prompt)?;
         let mut auth_recovery = auth_manager
             .as_ref()
             .map(super::auth::AuthManager::unauthorized_recovery);
         loop {
             let client_setup = self.client.current_client_setup().await?;
+            let api_prompt = self.build_responses_request(
+                &client_setup.api_provider,
+                prompt,
+                model_info,
+                effort,
+                summary,
+            )?;
             let transport = ReqwestTransport::new(build_reqwest_client());
             let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(otel_manager);
             let client = ApiChatCompletionsClient::new(
@@ -829,7 +837,10 @@ impl ModelClientSession {
                 .stream_prompt(&model_info.slug, &api_prompt, options)
                 .await
             {
-                Ok(stream) => return Ok(map_response_stream(stream, otel_manager.clone())),
+                Ok(stream) => {
+                    let (stream, _) = map_response_stream(stream, otel_manager.clone());
+                    return Ok(stream);
+                }
                 Err(ApiError::Transport(
                     unauthorized_transport @ TransportError::Http { status, .. },
                 )) if status == StatusCode::UNAUTHORIZED => {
@@ -995,6 +1006,8 @@ impl ModelClientSession {
                     prompt,
                     model_info,
                     otel_manager,
+                    effort,
+                    summary,
                     turn_metadata_header,
                 )
                 .await

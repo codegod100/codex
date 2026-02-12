@@ -307,11 +307,11 @@ impl ModelProviderInfo {
                     None
                 }
                 .ok_or_else(|| {
-                        crate::error::CodexErr::EnvVar(EnvVarError {
-                            var: env_key.clone(),
-                            instructions: self.env_key_instructions.clone(),
-                        })
-                    })?;
+                    crate::error::CodexErr::EnvVar(EnvVarError {
+                        var: env_key.clone(),
+                        instructions: self.env_key_instructions.clone(),
+                    })
+                })?;
                 Ok(Some(api_key))
             }
             None => Ok(None),

@@ -105,7 +105,6 @@ impl StatusLineItem {
             StatusLineItem::CurrentDir => "Current working directory",
             StatusLineItem::Provider => "Model provider name",
             StatusLineItem::ProjectRoot => "Project root directory (omitted when unavailable)",
-            StatusLineItem::Provider => "Model provider name",
             StatusLineItem::GitBranch => "Current Git branch (omitted when unavailable)",
             StatusLineItem::ContextRemaining => {
                 "Percentage of context window remaining (omitted when unknown)"
@@ -143,7 +142,6 @@ impl StatusLineItem {
             StatusLineItem::CurrentDir => "~/project/path",
             StatusLineItem::Provider => "openai",
             StatusLineItem::ProjectRoot => "~/project",
-            StatusLineItem::Provider => "openai",
             StatusLineItem::GitBranch => "feat/awesome-feature",
             StatusLineItem::ContextRemaining => "18% left",
             StatusLineItem::ContextUsed => "82% used",

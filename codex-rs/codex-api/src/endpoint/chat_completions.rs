@@ -1,6 +1,6 @@
 use crate::auth::AuthProvider;
-use crate::common::Prompt as ApiPrompt;
 use crate::common::ResponseStream;
+use crate::common::ResponsesApiRequest as ApiPrompt;
 use crate::endpoint::session::EndpointSession;
 use crate::error::ApiError;
 use crate::provider::Provider;
@@ -147,9 +147,9 @@ fn build_chat_messages(prompt: &ApiPrompt) -> Vec<Value> {
     for item in &prompt.input {
         match item {
             ResponseItem::Message { role, content, .. } => {
-                if let Some(text) = extract_text_content(content)
+                if let Some(text) = extract_text_content(&content)
                     && !text.is_empty()
-                    && let Some(chat_role) = normalize_chat_role(role)
+                    && let Some(chat_role) = normalize_chat_role(&role)
                 {
                     messages.push(json!({
                         "role": chat_role,
@@ -340,6 +340,7 @@ fn response_stream_from_non_stream_completion(body: Value) -> Result<ResponseStr
             .send(Ok(crate::common::ResponseEvent::Completed {
                 response_id: completion.id,
                 token_usage: completion.usage.map(Into::into),
+                can_append: false,
             }))
             .await;
     });
@@ -350,8 +351,8 @@ fn response_stream_from_non_stream_completion(body: Value) -> Result<ResponseStr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Prompt as ApiPrompt;
     use crate::common::ResponseEvent;
+    use crate::common::ResponsesApiRequest as ApiPrompt;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::ResponseItem;
     use futures::StreamExt;
@@ -406,11 +407,13 @@ mod tests {
         let ResponseEvent::Completed {
             response_id,
             token_usage,
+            can_append,
         } = &events[2]
         else {
             panic!("expected Completed, got {:?}", events[2]);
         };
         assert_eq!(response_id, "resp_123");
+        assert!(!can_append);
         assert_eq!(
             token_usage,
             &Some(TokenUsage {
@@ -426,6 +429,7 @@ mod tests {
     #[test]
     fn build_chat_messages_maps_developer_role_to_system() {
         let prompt = ApiPrompt {
+            model: "gpt-test".to_string(),
             instructions: "instructions".to_string(),
             input: vec![
                 ResponseItem::Message {
@@ -448,8 +452,14 @@ mod tests {
                 },
             ],
             tools: Vec::new(),
+            tool_choice: "auto".to_string(),
             parallel_tool_calls: false,
-            output_schema: None,
+            reasoning: None,
+            store: false,
+            stream: true,
+            include: Vec::new(),
+            prompt_cache_key: None,
+            text: None,
         };
 
         let messages = build_chat_messages(&prompt);
