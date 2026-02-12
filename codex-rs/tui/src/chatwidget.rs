@@ -4456,6 +4456,7 @@ impl ChatWidget {
             StatusLineItem::CurrentDir => {
                 Some(format_directory_display(self.status_line_cwd(), None))
             }
+            StatusLineItem::Provider => Some(self.config.model_provider.name.clone()),
             StatusLineItem::ProjectRoot => self.status_line_project_root_name(),
             StatusLineItem::GitBranch => self.status_line_branch.clone(),
             StatusLineItem::UsedTokens => {

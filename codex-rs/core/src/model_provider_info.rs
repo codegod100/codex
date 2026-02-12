@@ -30,11 +30,36 @@ const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
 const COPILOT_PROVIDER_NAME: &str = "GitHub Copilot";
-const OPENROUTER_PROVIDER_NAME: &str = "OpenRouter";
 const COPILOT_DEFAULT_BASE_URL: &str = "https://api.githubcopilot.com/v1";
-const OPENROUTER_DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub(crate) const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
 pub(crate) const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
+
+#[derive(Clone, Copy)]
+struct OpenAiCompatibleProviderDefinition {
+    id: &'static str,
+    name: &'static str,
+    base_url_env_var: &'static str,
+    default_base_url: &'static str,
+    env_key: Option<&'static str>,
+    env_key_instructions: Option<&'static str>,
+    wire_api: WireApi,
+    env_http_headers: &'static [(&'static str, &'static str)],
+}
+
+const BUILTIN_OPENAI_COMPATIBLE_PROVIDERS: [OpenAiCompatibleProviderDefinition; 1] = [
+    OpenAiCompatibleProviderDefinition {
+        id: COPILOT_PROVIDER_ID,
+        name: COPILOT_PROVIDER_NAME,
+        base_url_env_var: "GITHUB_COPILOT_BASE_URL",
+        default_base_url: COPILOT_DEFAULT_BASE_URL,
+        env_key: Some("GITHUB_TOKEN"),
+        env_key_instructions: Some(
+            "Run `codex login --copilot` or set GITHUB_TOKEN to a token with access to GitHub Copilot models.",
+        ),
+        wire_api: WireApi::Responses,
+        env_http_headers: &[],
+    },
+];
 
 /// Wire protocol that the provider speaks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, JsonSchema)]
@@ -138,6 +163,19 @@ pub struct ModelProviderInfo {
 }
 
 impl ModelProviderInfo {
+    fn env_http_headers_from_pairs(pairs: &[(&str, &str)]) -> Option<HashMap<String, String>> {
+        if pairs.is_empty() {
+            None
+        } else {
+            Some(
+                pairs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            )
+        }
+    }
+
     fn base_url_from_env_or_default(
         base_url_env_var: &str,
         default_base_url: &str,
@@ -174,6 +212,21 @@ impl ModelProviderInfo {
             supports_websockets: false,
             stream: None,
         }
+    }
+
+    fn create_from_openai_compatible_definition(
+        definition: OpenAiCompatibleProviderDefinition,
+    ) -> ModelProviderInfo {
+        let mut provider = Self::create_openai_compatible_provider(
+            definition.name,
+            definition.base_url_env_var,
+            definition.default_base_url,
+            definition.env_key,
+            definition.env_key_instructions,
+            Self::env_http_headers_from_pairs(definition.env_http_headers),
+        );
+        provider.wire_api = definition.wire_api;
+        provider
     }
 
     fn build_header_map(&self) -> crate::error::Result<HeaderMap> {
@@ -349,40 +402,6 @@ impl ModelProviderInfo {
     pub fn is_openai(&self) -> bool {
         self.name == OPENAI_PROVIDER_NAME
     }
-
-    pub fn create_copilot_provider() -> ModelProviderInfo {
-        Self::create_openai_compatible_provider(
-            COPILOT_PROVIDER_NAME,
-            "GITHUB_COPILOT_BASE_URL",
-            COPILOT_DEFAULT_BASE_URL,
-            Some("GITHUB_TOKEN"),
-            Some(
-                "Run `codex login --copilot` or set GITHUB_TOKEN to a token with access to GitHub Copilot models.",
-            ),
-            None,
-        )
-    }
-
-    pub fn create_openrouter_provider() -> ModelProviderInfo {
-        Self::create_openai_compatible_provider(
-            OPENROUTER_PROVIDER_NAME,
-            "OPENROUTER_BASE_URL",
-            OPENROUTER_DEFAULT_BASE_URL,
-            Some("OPENROUTER_API_KEY"),
-            Some("Set OPENROUTER_API_KEY to your OpenRouter API key."),
-            Some(
-                [
-                    (
-                        "HTTP-Referer".to_string(),
-                        "OPENROUTER_HTTP_REFERER".to_string(),
-                    ),
-                    ("X-Title".to_string(), "OPENROUTER_X_TITLE".to_string()),
-                ]
-                .into_iter()
-                .collect(),
-            ),
-        )
-    }
 }
 
 pub const DEFAULT_LMSTUDIO_PORT: u16 = 1234;
@@ -391,31 +410,35 @@ pub const DEFAULT_OLLAMA_PORT: u16 = 11434;
 pub const LMSTUDIO_OSS_PROVIDER_ID: &str = "lmstudio";
 pub const OLLAMA_OSS_PROVIDER_ID: &str = "ollama";
 pub const COPILOT_PROVIDER_ID: &str = "copilot";
-pub const OPENROUTER_PROVIDER_ID: &str = "openrouter";
 
 /// Built-in default provider list.
 pub fn built_in_model_providers() -> HashMap<String, ModelProviderInfo> {
-    use ModelProviderInfo as P;
-
     // We intentionally keep built-ins small and practical: first-party defaults
     // plus providers needed for common local and Copilot-backed setups.
     // Users can add any other providers in `model_providers`.
-    [
-        ("openai", P::create_openai_provider()),
-        (COPILOT_PROVIDER_ID, P::create_copilot_provider()),
-        (OPENROUTER_PROVIDER_ID, P::create_openrouter_provider()),
-        (
-            OLLAMA_OSS_PROVIDER_ID,
-            create_oss_provider(DEFAULT_OLLAMA_PORT, WireApi::Responses),
-        ),
-        (
-            LMSTUDIO_OSS_PROVIDER_ID,
-            create_oss_provider(DEFAULT_LMSTUDIO_PORT, WireApi::Responses),
-        ),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_string(), v))
-    .collect()
+    let mut providers = HashMap::from([(
+        "openai".to_string(),
+        ModelProviderInfo::create_openai_provider(),
+    )]);
+    providers.extend(
+        BUILTIN_OPENAI_COMPATIBLE_PROVIDERS
+            .into_iter()
+            .map(|definition| {
+                (
+                    definition.id.to_string(),
+                    ModelProviderInfo::create_from_openai_compatible_definition(definition),
+                )
+            }),
+    );
+    providers.insert(
+        OLLAMA_OSS_PROVIDER_ID.to_string(),
+        create_oss_provider(DEFAULT_OLLAMA_PORT, WireApi::Responses),
+    );
+    providers.insert(
+        LMSTUDIO_OSS_PROVIDER_ID.to_string(),
+        create_oss_provider(DEFAULT_LMSTUDIO_PORT, WireApi::Responses),
+    );
+    providers
 }
 
 pub fn create_oss_provider(default_provider_port: u16, wire_api: WireApi) -> ModelProviderInfo {
@@ -655,20 +678,5 @@ wire_api_by_model = { "gpt-5" = "responses", "claude-" = "chat_completions" }
         );
         assert_eq!(copilot.env_key.as_deref(), Some("GITHUB_TOKEN"));
         assert!(!copilot.requires_openai_auth);
-    }
-
-    #[test]
-    fn builtins_include_openrouter_provider() {
-        let providers = built_in_model_providers();
-        let openrouter = providers
-            .get(OPENROUTER_PROVIDER_ID)
-            .expect("openrouter provider should exist");
-        assert_eq!(openrouter.name, OPENROUTER_PROVIDER_NAME);
-        assert_eq!(
-            openrouter.base_url.as_deref(),
-            Some("https://openrouter.ai/api/v1")
-        );
-        assert_eq!(openrouter.env_key.as_deref(), Some("OPENROUTER_API_KEY"));
-        assert!(!openrouter.requires_openai_auth);
     }
 }

@@ -56,6 +56,9 @@ pub(crate) enum StatusLineItem {
     /// Current working directory path.
     CurrentDir,
 
+    /// Model provider name.
+    Provider,
+
     /// Project root directory (if detected).
     ProjectRoot,
 
@@ -100,7 +103,9 @@ impl StatusLineItem {
             StatusLineItem::ModelName => "Current model name",
             StatusLineItem::ModelWithReasoning => "Current model name with reasoning level",
             StatusLineItem::CurrentDir => "Current working directory",
+            StatusLineItem::Provider => "Model provider name",
             StatusLineItem::ProjectRoot => "Project root directory (omitted when unavailable)",
+            StatusLineItem::Provider => "Model provider name",
             StatusLineItem::GitBranch => "Current Git branch (omitted when unavailable)",
             StatusLineItem::ContextRemaining => {
                 "Percentage of context window remaining (omitted when unknown)"
@@ -136,7 +141,9 @@ impl StatusLineItem {
             StatusLineItem::ModelName => "gpt-5.2-codex",
             StatusLineItem::ModelWithReasoning => "gpt-5.2-codex medium",
             StatusLineItem::CurrentDir => "~/project/path",
+            StatusLineItem::Provider => "openai",
             StatusLineItem::ProjectRoot => "~/project",
+            StatusLineItem::Provider => "openai",
             StatusLineItem::GitBranch => "feat/awesome-feature",
             StatusLineItem::ContextRemaining => "18% left",
             StatusLineItem::ContextUsed => "82% used",

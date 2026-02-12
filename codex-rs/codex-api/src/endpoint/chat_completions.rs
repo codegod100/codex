@@ -149,9 +149,10 @@ fn build_chat_messages(prompt: &ApiPrompt) -> Vec<Value> {
             ResponseItem::Message { role, content, .. } => {
                 if let Some(text) = extract_text_content(content)
                     && !text.is_empty()
+                    && let Some(chat_role) = normalize_chat_role(role)
                 {
                     messages.push(json!({
-                        "role": role,
+                        "role": chat_role,
                         "content": text,
                     }));
                 }
@@ -189,6 +190,16 @@ fn build_chat_messages(prompt: &ApiPrompt) -> Vec<Value> {
         }
     }
     messages
+}
+
+fn normalize_chat_role(role: &str) -> Option<&str> {
+    match role {
+        // Several OpenAI-compatible Chat Completions providers reject
+        // "developer"; map it to the closest supported role.
+        "developer" => Some("system"),
+        "system" | "user" | "assistant" => Some(role),
+        _ => None,
+    }
 }
 
 fn build_chat_tools(prompt: &ApiPrompt) -> Vec<Value> {
@@ -289,12 +300,9 @@ fn response_stream_from_non_stream_completion(body: Value) -> Result<ResponseStr
         ))
     })?;
     let mut choices = completion.choices.into_iter();
-    let message = choices
-        .next()
-        .map(|choice| choice.message)
-        .ok_or_else(|| {
-            ApiError::Stream("non-streaming chat completion had no choices".to_string())
-        })?;
+    let message = choices.next().map(|choice| choice.message).ok_or_else(|| {
+        ApiError::Stream("non-streaming chat completion had no choices".to_string())
+    })?;
     let text = message.content.unwrap_or_default();
     let tool_calls = message.tool_calls.unwrap_or_default();
 
@@ -342,7 +350,9 @@ fn response_stream_from_non_stream_completion(body: Value) -> Result<ResponseStr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Prompt as ApiPrompt;
     use crate::common::ResponseEvent;
+    use codex_protocol::models::ContentItem;
     use codex_protocol::models::ResponseItem;
     use futures::StreamExt;
     use serde_json::json;
@@ -411,5 +421,41 @@ mod tests {
                 total_tokens: 15
             })
         );
+    }
+
+    #[test]
+    fn build_chat_messages_maps_developer_role_to_system() {
+        let prompt = ApiPrompt {
+            instructions: "instructions".to_string(),
+            input: vec![
+                ResponseItem::Message {
+                    id: None,
+                    role: "developer".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "dev constraints".to_string(),
+                    }],
+                    end_turn: None,
+                    phase: None,
+                },
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "hello".to_string(),
+                    }],
+                    end_turn: None,
+                    phase: None,
+                },
+            ],
+            tools: Vec::new(),
+            parallel_tool_calls: false,
+            output_schema: None,
+        };
+
+        let messages = build_chat_messages(&prompt);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1]["role"], json!("system"));
+        assert_eq!(messages[1]["content"], json!("dev constraints"));
+        assert_eq!(messages[2]["role"], json!("user"));
     }
 }

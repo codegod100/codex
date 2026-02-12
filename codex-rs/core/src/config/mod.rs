@@ -2015,6 +2015,7 @@ mod tests {
     use crate::config::types::Notifications;
     use crate::config_loader::RequirementSource;
     use crate::features::Feature;
+    use crate::model_provider_info::WireApi;
 
     use super::*;
     use core_test_support::test_absolute_path;
@@ -3982,6 +3983,12 @@ request_max_retries = 4            # retry failed HTTP requests
 stream_max_retries = 10            # retry dropped SSE streams
 stream_idle_timeout_ms = 300000    # 5m idle timeout
 
+[model_providers.zai]
+name = "Z.ai"
+base_url = "https://chat.z.ai/api/v1"
+env_key = "ZAI_API_KEY"
+wire_api = "chat_completions"
+
 [profiles.o3]
 model = "o3"
 model_provider = "openai"
@@ -4008,6 +4015,10 @@ approval_policy = "on-failure"
 model_reasoning_effort = "high"
 model_reasoning_summary = "detailed"
 model_verbosity = "high"
+
+[profiles.zai]
+model = "glm-4.5"
+model_provider = "zai"
 "#;
 
         let cfg: ConfigToml = toml::from_str(toml).expect("TOML deserialization should succeed");
@@ -4043,6 +4054,27 @@ model_verbosity = "high"
         let model_provider_map = {
             let mut model_provider_map = built_in_model_providers();
             model_provider_map.insert("openai-custom".to_string(), openai_custom_provider.clone());
+            model_provider_map.insert(
+                "zai".to_string(),
+                ModelProviderInfo {
+                    name: "Z.ai".to_string(),
+                    base_url: Some("https://chat.z.ai/api/v1".to_string()),
+                    env_key: Some("ZAI_API_KEY".to_string()),
+                    wire_api: crate::WireApi::ChatCompletions,
+                    wire_api_by_model: None,
+                    env_key_instructions: None,
+                    experimental_bearer_token: None,
+                    query_params: None,
+                    http_headers: None,
+                    env_http_headers: None,
+                    request_max_retries: None,
+                    stream_max_retries: None,
+                    stream_idle_timeout_ms: None,
+                    requires_openai_auth: false,
+                    supports_websockets: false,
+                    stream: None,
+                },
+            );
             model_provider_map
         };
 
@@ -4480,6 +4512,36 @@ model_verbosity = "high"
         };
 
         assert_eq!(expected_gpt5_profile_config, gpt5_profile_config);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_precedence_fixture_with_zai_profile() -> std::io::Result<()> {
+        let fixture = create_test_fixture()?;
+
+        let zai_profile_overrides = ConfigOverrides {
+            config_profile: Some("zai".to_string()),
+            cwd: Some(fixture.cwd()),
+            ..Default::default()
+        };
+        let zai_profile_config = Config::load_from_base_config_with_overrides(
+            fixture.cfg.clone(),
+            zai_profile_overrides,
+            fixture.codex_home(),
+        )?;
+
+        assert_eq!(zai_profile_config.active_profile.as_deref(), Some("zai"));
+        assert_eq!(zai_profile_config.model.as_deref(), Some("glm-4.5"));
+        assert_eq!(zai_profile_config.model_provider_id, "zai");
+        assert_eq!(
+            zai_profile_config.model_provider.wire_api,
+            WireApi::ChatCompletions
+        );
+        assert_eq!(
+            zai_profile_config.model_provider.base_url.as_deref(),
+            Some("https://chat.z.ai/api/v1")
+        );
 
         Ok(())
     }
